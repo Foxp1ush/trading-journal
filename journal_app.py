@@ -552,6 +552,56 @@ def _csv_import() -> None:
         st.error(f"CSV 읽기 실패: {exc}")
 
 
+def _balance_reconcile() -> None:
+    """예수금 보정 — 입출금 기록이 없을 때 현재 실제 예수금에 맞춰 보정 입출금 1건 추가."""
+    st.caption(
+        "입출금을 안 적으면 현금이 음수(순매수금액)로 잡힙니다. **현재 실제 예수금**을 넣으면 차액만큼 "
+        "**보정 입출금 1건**을 추가해 맞춥니다. 보유시가는 매매 기록에서 이미 반영돼 있어요."
+    )
+    txns = df_to_txns(st.session_state.get("loaded_df"))
+    by_ccy = jc.split_by_currency(txns)
+    ccy_options = [c for c in ("USD", "KRW") if c in by_ccy] or ["USD", "KRW"]
+    ccy = st.selectbox("통화", ccy_options, key="rec_ccy")
+
+    ccy_txns = by_ccy.get(ccy, [])
+    computed = jc.replay(ccy_txns)[0]
+    dates = [pd.Timestamp(t["date"]) for t in ccy_txns if t.get("date")]
+    default_date = min(dates).date() if dates else date.today()
+
+    c1, c2 = st.columns(2)
+    c1.metric("계산상 예수금(현재)", fmt_money(computed, ccy), help="입금·매도 − 출금·매수로 계산된 현금")
+    real = c2.number_input("실제 예수금(증권사 화면)", min_value=0.0, value=None, key="rec_real")
+    rec_date = st.date_input("보정 거래 날짜", value=default_date, format="YYYY-MM-DD", key="rec_date")
+
+    if real is None:
+        st.info("실제 예수금을 입력하면 보정 금액을 계산합니다.")
+        return
+    adj = float(real) - computed
+    if abs(adj) < 1e-9:
+        st.success("이미 실제 예수금과 일치합니다 — 보정 불필요.")
+        return
+    side = jc.DEPOSIT if adj > 0 else jc.WITHDRAW
+    st.write(
+        f"보정 거래: **{side} {fmt_money(abs(adj), ccy)}** ({rec_date}) "
+        f"→ 이후 현금이 {fmt_money(float(real), ccy)}가 됩니다."
+    )
+    if st.button("⚖️ 보정 거래 추가·저장", key="rec_add", type="primary"):
+        row, err = build_manual_row(rec_date, "00:00", "", side, abs(adj), None, ccy,
+                                    "", "예수금 보정(입출금 기록 없음)")
+        if err:
+            st.error(err)
+            return
+        base = st.session_state.get("loaded_df")
+        new_df = (pd.DataFrame([row]) if base is None or len(base) == 0
+                  else pd.concat([base, pd.DataFrame([row])], ignore_index=True))
+        try:
+            _persist_trades(new_df)
+            st.toast(f"⚖️ 보정 완료 — {side} {fmt_money(abs(adj), ccy)}", icon="✅")
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"저장 실패: {exc}")
+
+
 def _full_table_editor() -> None:
     """전체 거래 수정·삭제(벌크) — 표 편집 후 💾 저장. 평소엔 접혀 있어 스크롤 부담 없음."""
     st.caption(
@@ -600,6 +650,9 @@ def record_fragment() -> None:
 
     with st.expander("📥 CSV로 여러 건 가져오기", expanded=False):
         _csv_import()
+
+    with st.expander("⚖️ 예수금 보정 (입출금 기록이 없을 때)", expanded=False):
+        _balance_reconcile()
 
     draft = st.session_state.get("draft_df")
     n_rows = 0 if draft is None else len(draft)

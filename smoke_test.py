@@ -68,6 +68,28 @@ over = jc.process_transactions(
 )
 check("초과매도 경고 발생", len(over.warnings) >= 1)
 
+# 현금/계좌가치 (입금 20000 → BUY 100@150 → SELL 80@160 → cash 17800, 보유 20)
+cash_txns = [
+    {"date": "2026-06-01", "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 20000, "shares": 0},
+    {"date": "2026-06-01", "time": "09:30", "ticker": "AAPL", "side": "BUY",  "price": 150, "shares": 100},
+    {"date": "2026-06-01", "time": "14:00", "ticker": "AAPL", "side": "SELL", "price": 160, "shares": 80},
+]
+acc = jc.current_account(cash_txns, {"AAPL": 165.0})
+check("현금잔고 =17800", abs(acc["cash"] - 17800) < 1e-6, f"{acc['cash']}")
+check("보유시가 =3300 (20×165)", abs(acc["holdings_value"] - 3300) < 1e-6, f"{acc['holdings_value']}")
+check("계좌가치 =21100", abs(acc["account_value"] - 21100) < 1e-6, f"{acc['account_value']}")
+check("자산배분에 현금 포함", "현금" in acc["allocation"] and "AAPL" in acc["allocation"])
+
+# 계좌가치 곡선 — 합성 가격으로 정상 동작
+import pandas as _pd
+_aapl = _pd.DataFrame(
+    {"Close": [155.0, 158.0]},
+    index=_pd.to_datetime(["2026-06-01", "2026-06-02"]),
+)
+avc = jc.account_value_curve(cash_txns, {"AAPL": _aapl})
+check("계좌가치 곡선 생성", not avc.empty and "계좌가치" in avc.columns,
+      f"empty={avc.empty}")
+
 # 3) 앱 부팅 (AppTest) — exception 0
 try:
     from streamlit.testing.v1 import AppTest

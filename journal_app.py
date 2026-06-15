@@ -114,23 +114,30 @@ def _pnl_chart_with_trades(detail_df: pd.DataFrame, rows, y_title: str) -> alt.L
     """종목별 누적손익 라인 + 매수(초록 ▲)·매도(빨강 ▼) 시점 마커."""
     layers = _pnl_layer_list(detail_df, y_title)
     mk = _trade_markers(rows)
-    if not mk.empty:
-        layers.append(
-            alt.Chart(mk)
-            .mark_point(size=140, filled=True, opacity=0.95, stroke="white", strokeWidth=1)
-            .encode(
-                x="날짜:T", y="값:Q",
-                color=alt.Color("거래:N", title="거래",
-                                scale=alt.Scale(domain=["매수", "매도"], range=["#2ca02c", "#d62728"])),
-                shape=alt.Shape("거래:N", title="거래",
-                                scale=alt.Scale(domain=["매수", "매도"], range=["triangle-up", "triangle-down"])),
-                tooltip=[alt.Tooltip("날짜:T", title="시점"), alt.Tooltip("거래:N", title="구분"),
-                         alt.Tooltip("가격:Q", title="체결가", format=",.2f"),
-                         alt.Tooltip("수량:Q", title="수량", format="g"),
-                         alt.Tooltip("값:Q", title="누적손익", format="+.2f")],
-            )
+    if mk.empty:
+        return alt.layer(*layers).properties(height=360, autosize=_PNL_AUTOSIZE)
+    layers.append(
+        alt.Chart(mk)
+        .mark_point(size=140, filled=True, opacity=0.95, stroke="white", strokeWidth=1)
+        .encode(
+            x="날짜:T", y="값:Q",
+            color=alt.Color("거래:N", title="거래",
+                            scale=alt.Scale(domain=["매수", "매도"], range=["#2ca02c", "#d62728"])),
+            shape=alt.Shape("거래:N", title="거래",
+                            scale=alt.Scale(domain=["매수", "매도"], range=["triangle-up", "triangle-down"])),
+            tooltip=[alt.Tooltip("날짜:T", title="시점"), alt.Tooltip("거래:N", title="구분"),
+                     alt.Tooltip("가격:Q", title="체결가", format=",.2f"),
+                     alt.Tooltip("수량:Q", title="수량", format="g"),
+                     alt.Tooltip("값:Q", title="누적손익", format="+.2f")],
         )
-    return alt.layer(*layers).properties(height=360, autosize=_PNL_AUTOSIZE)
+    )
+    # 라인은 '계열'(종목명), 마커는 '거래'(매수/매도)로 색을 쓰므로 색 스케일을 레이어별 독립으로.
+    # (공유하면 마커 색 도메인에 종목명이 없어 라인이 안 보이게 됨)
+    return (
+        alt.layer(*layers)
+        .resolve_scale(color="independent", shape="independent")
+        .properties(height=360, autosize=_PNL_AUTOSIZE)
+    )
 
 
 def _line_chart(df: pd.DataFrame, y_title: str) -> alt.Chart:

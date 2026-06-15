@@ -35,6 +35,34 @@ def load_krx_listing() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
+def load_kr_etf() -> pd.DataFrame:
+    """국내 ETF 목록 → 컬럼 [Code, Name]. 실패 시 빈 DataFrame."""
+    try:
+        import FinanceDataReader as fdr
+        d = fdr.StockListing("ETF/KR")
+        return pd.DataFrame({
+            "Code": d["Symbol"].astype(str).str.zfill(6),
+            "Name": d["Name"].astype(str),
+        })
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame(columns=["Code", "Name"])
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_us_etf() -> pd.DataFrame:
+    """미국 ETF 목록 → 컬럼 [Symbol, Name]. 실패 시 빈 DataFrame."""
+    try:
+        import FinanceDataReader as fdr
+        d = fdr.StockListing("ETF/US")
+        return pd.DataFrame({
+            "Symbol": d["Symbol"].astype(str),
+            "Name": d["Name"].astype(str),
+        })
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame(columns=["Symbol", "Name"])
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_us_listing() -> pd.DataFrame:
     """미국 상장목록(NASDAQ·NYSE·AMEX) → 컬럼 [Symbol, Name, Market]. 실패 시 빈 DataFrame."""
     frames = []
@@ -66,34 +94,43 @@ def to_yf_ticker(code: str, market: str) -> str:
 
 
 def _search_kr(q: str, limit: int) -> list[dict]:
+    out: list[dict] = []
+    # 개별주식
     df = load_krx_listing()
-    if df.empty:
-        return []
-    if _CODE_RE.match(q):
-        hit = df[df["Code"] == q]
-    else:
-        hit = df[df["Name"].str.lower().str.contains(q.lower(), na=False)]
-    return [
-        {"ticker": to_yf_ticker(r["Code"], r["Market"]), "name": r["Name"],
-         "market": r["Market"], "currency": "KRW"}
-        for _, r in hit.head(limit).iterrows()
-    ]
+    if not df.empty:
+        hit = df[df["Code"] == q] if _CODE_RE.match(q) else df[df["Name"].str.lower().str.contains(q.lower(), na=False)]
+        out += [
+            {"ticker": to_yf_ticker(r["Code"], r["Market"]), "name": r["Name"],
+             "market": r["Market"], "currency": "KRW"}
+            for _, r in hit.head(limit).iterrows()
+        ]
+    # ETF (국내 ETF는 KOSPI 상장 → .KS)
+    etf = load_kr_etf()
+    if not etf.empty:
+        ehit = etf[etf["Code"] == q] if _CODE_RE.match(q) else etf[etf["Name"].str.lower().str.contains(q.lower(), na=False)]
+        out += [
+            {"ticker": f"{r['Code']}.KS", "name": r["Name"], "market": "ETF", "currency": "KRW"}
+            for _, r in ehit.head(limit).iterrows()
+        ]
+    return out[:limit]
 
 
 def _search_us(q: str, limit: int) -> list[dict]:
-    df = load_us_listing()
-    if df.empty:
-        return []
-    ql = q.lower()
-    by_symbol = df["Symbol"].str.upper() == q.upper()
-    by_name = df["Name"].str.lower().str.contains(ql, na=False)
-    hit = df[by_symbol | by_name]
-    # 심볼 정확매치를 위로
-    hit = hit.assign(_exact=by_symbol[hit.index].astype(int)).sort_values("_exact", ascending=False)
+    """미국 주식 + ETF 통합 검색. 심볼 정확매치(주식·ETF 무관)를 최상단으로."""
+    ql, qu = q.lower(), q.upper()
+    cands: list[tuple] = []  # (exact, ticker, name, market)
+    for df, market in ((load_us_listing(), None), (load_us_etf(), "ETF")):
+        if df.empty:
+            continue
+        m = (df["Symbol"].str.upper() == qu) | df["Name"].str.lower().str.contains(ql, na=False)
+        for _, r in df[m].iterrows():
+            sym = str(r["Symbol"]).upper()
+            mk = market or str(r.get("Market", ""))
+            cands.append((1 if sym == qu else 0, sym, r["Name"], mk))
+    cands.sort(key=lambda c: -c[0])  # 정확 심볼 매치 우선
     return [
-        {"ticker": str(r["Symbol"]).upper(), "name": r["Name"],
-         "market": r["Market"], "currency": "USD"}
-        for _, r in hit.head(limit).iterrows()
+        {"ticker": c[1], "name": c[2], "market": c[3], "currency": "USD"}
+        for c in cands[:limit]
     ]
 
 
@@ -117,11 +154,12 @@ def resolve_name(yf_ticker: str) -> str | None:
     if not (t.endswith(".KS") or t.endswith(".KQ")):
         return None
     code = t.rsplit(".", 1)[0].zfill(6)
-    df = load_krx_listing()
-    if df.empty:
-        return None
-    hit = df[df["Code"] == code]
-    return str(hit.iloc[0]["Name"]) if not hit.empty else None
+    for df in (load_krx_listing(), load_kr_etf()):
+        if not df.empty and "Code" in df.columns:
+            hit = df[df["Code"] == code]
+            if not hit.empty:
+                return str(hit.iloc[0]["Name"])
+    return None
 
 
 if __name__ == "__main__":
@@ -133,4 +171,8 @@ if __name__ == "__main__":
     print("search('005930'):", search("005930"))
     print("search('apple'):", search("apple", 3))
     print("search('NVDA'):", search("NVDA", 3))
+    print("search('SPY'):", search("SPY", 3))
+    print("search('KODEX 200'):", search("KODEX 200", 3))
+    print("search('069500'):", search("069500"))
     print("resolve_name('005930.KS'):", resolve_name("005930.KS"))
+    print("resolve_name('069500.KS'):", resolve_name("069500.KS"))

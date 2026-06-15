@@ -303,7 +303,7 @@ with st.expander("📥 CSV로 한 번에 가져오기 (선택)", expanded=False)
 # ---------- 종목 검색해서 추가 (국내·미국) ----------
 
 with st.expander("🔎 종목 검색해서 추가 (국내·미국)", expanded=False):
-    st.caption("티커/코드를 몰라도 됩니다. 종목명(삼성전자·apple)·6자리 코드(005930)·심볼(AAPL)로 검색하세요.")
+    st.caption("개별주식·ETF(국내·미국) 모두. 종목명(삼성전자·apple)·코드(005930)·심볼(AAPL·SPY·KODEX)로 검색하세요.")
     q = st.text_input("종목명 / 코드 / 심볼", key="krx_q", placeholder="예: 삼성전자, 005930, apple, AAPL")
     if q.strip():
         hits = krx.search(q)

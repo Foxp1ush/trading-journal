@@ -66,6 +66,15 @@ check("NVDA 실현손익 =200, 보유 0",
       nvda and abs(nvda.realized_pnl - 200) < 1e-9 and nvda.position_shares == 0,
       f"{(nvda.realized_pnl, nvda.position_shares) if nvda else None}")
 
+# 같은 시각 BUY/SELL — 매수 먼저 처리되어 보유 0 (입력순이 SELL 먼저여도)
+same_ts = jc.process_portfolio([
+    {"date": "2026-05-20", "time": "09:30", "ticker": "GCTS", "side": "SELL", "price": 2.5, "shares": 100},
+    {"date": "2026-05-20", "time": "09:30", "ticker": "GCTS", "side": "BUY",  "price": 2.1, "shares": 100},
+])["GCTS"]
+check("동일시각 매수→매도, 보유 0 & 실현 +40",
+      abs(same_ts.position_shares) < 1e-9 and abs(same_ts.realized_pnl - 40) < 1e-6,
+      f"보유={same_ts.position_shares}, 실현={same_ts.realized_pnl}")
+
 # 초과매도 경고 동작
 over = jc.process_transactions(
     [{"date": "2026-06-01", "time": "09:30", "ticker": "X", "side": "SELL", "price": 10, "shares": 5}],

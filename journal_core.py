@@ -95,6 +95,22 @@ def _parse_ts(date: str, time: str) -> pd.Timestamp:
     return pd.Timestamp(f"{date} {t}")
 
 
+# 같은 시각(타임스탬프 동률)일 때 처리 순서: 입금 → 매수 → 매도 → 출금.
+# 특히 같은 날 BUY/SELL의 시각이 같거나 비어 있으면 '매수 먼저' 처리해야
+# 보유수량이 초과매도로 어긋나지 않는다(같은 순간에 사기 전에 팔 수는 없음).
+_SIDE_ORDER = {DEPOSIT: 0, BUY: 1, SELL: 2, WITHDRAW: 3}
+
+
+def _side_priority(side: str) -> int:
+    return _SIDE_ORDER.get(str(side).strip().upper(), 1)
+
+
+def _sort_key(item: tuple[int, Txn]):
+    """(원래입력순서, 거래) → 정렬 키 (시각, 같은시각이면 매수먼저, 입력순)."""
+    idx, t = item
+    return (_parse_ts(t["date"], t["time"]), _side_priority(t["side"]), idx)
+
+
 def process_transactions(txns: list[Txn], ticker: str = "") -> JournalResult:
     """단일 종목 거래 리스트를 (날짜,시각,입력순) 정렬 후 평균단가 엔진으로 처리.
 
@@ -102,8 +118,7 @@ def process_transactions(txns: list[Txn], ticker: str = "") -> JournalResult:
     SELL : sell = min(shares, pos); realized += (price-avg_cost)*sell; pos -= sell
            (평단 관례상 매도는 avg_cost 불변, pos==0이면 리셋)
     """
-    indexed = list(enumerate(txns))
-    indexed.sort(key=lambda it: (_parse_ts(it[1]["date"], it[1]["time"]), it[0]))
+    indexed = sorted(enumerate(txns), key=_sort_key)
 
     pos = avg_cost = realized = total_buy_cost = 0.0
     rows: list[ProcessedRow] = []
@@ -271,8 +286,7 @@ def replay(txns: list[Txn]) -> tuple[float, dict[str, float], list[tuple[pd.Time
 
     타임라인: 각 거래 처리 직후 (ts, cash, positions 사본) — 계좌가치 곡선의 시점 상태원.
     """
-    indexed = list(enumerate(txns))
-    indexed.sort(key=lambda it: (_parse_ts(it[1]["date"], it[1]["time"]), it[0]))
+    indexed = sorted(enumerate(txns), key=_sort_key)
 
     cash = 0.0
     positions: dict[str, float] = {}

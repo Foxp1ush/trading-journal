@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 
 import journal_core as jc
+import krx
 import prices
 import sheets
 
@@ -113,6 +114,20 @@ def fmt_money(x: float, ccy: str) -> str:
     return f"{x:,.2f} {ccy}"
 
 
+def append_row(ticker: str, ccy: str) -> None:
+    """검색 결과를 거래 표(loaded_df)에 새 행으로 추가하고 에디터를 새로고침."""
+    new = {"date": str(date.today()), "time": "09:30", "ticker": ticker,
+           "side": "BUY", "price": None, "shares": None, "currency": ccy}
+    df = st.session_state.get("loaded_df")
+    if df is None or len(df) == 0:
+        df = pd.DataFrame([new])
+    else:
+        df = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
+    st.session_state["loaded_df"] = df
+    st.session_state["editor_ver"] = st.session_state.get("editor_ver", 0) + 1
+    st.rerun()
+
+
 def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
     """한 통화(USD 또는 KRW)의 계좌·손익 섹션을 통째로 렌더. 단일통화라 기존 함수 그대로 사용."""
     st.header(CCY_LABEL.get(ccy, f"{ccy} 계좌"))
@@ -164,6 +179,8 @@ def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
     # 매매 손익
     st.subheader("매매 손익 — 종목별")
     summary = jc.portfolio_summary(results, last_closes)
+    if ccy == "KRW" and "티커" in summary.columns:  # 한글 종목명 병기(표시용)
+        summary.insert(1, "종목명", summary["티커"].map(lambda t: krx.resolve_name(t) or ""))
     m = st.columns(4)
     m[0].metric("실현손익 합계", fmt_money(summary["실현손익"].sum(), ccy))
     m[1].metric("미실현손익 합계", fmt_money(summary["미실현손익"].sum(), ccy))
@@ -276,10 +293,27 @@ with st.expander("📥 CSV로 한 번에 가져오기 (선택)", expanded=False)
                 st.dataframe(imported, width="stretch")
                 if st.button("이 데이터로 채우기", key="csv_apply"):
                     st.session_state["loaded_df"] = imported
+                    st.session_state["editor_ver"] = st.session_state.get("editor_ver", 0) + 1
                     st.success(f"{len(imported)}행을 불러왔습니다. 아래 표에서 확인 후 💾 저장하세요.")
                     st.rerun()
         except Exception as exc:  # noqa: BLE001
             st.error(f"CSV 읽기 실패: {exc}")
+
+
+# ---------- 종목 검색해서 추가 (국내) ----------
+
+with st.expander("🔎 종목 검색해서 추가 (국내 주식 이름/코드)", expanded=False):
+    st.caption("국내 주식은 .KS/.KQ를 몰라도 됩니다. 종목명(삼성전자) 또는 6자리 코드(005930)로 검색하세요.")
+    q = st.text_input("종목명 또는 6자리 코드", key="krx_q", placeholder="예: 삼성전자, 005930")
+    if q.strip():
+        hits = krx.search(q)
+        if hits:
+            labels = [f"{h['name']} ({h['code']}, {h['market']}) → {h['ticker']}" for h in hits]
+            idx = st.selectbox("후보 선택", range(len(hits)), format_func=lambda i: labels[i], key="krx_pick")
+            if st.button("➕ 이 종목 추가", key="krx_add"):
+                append_row(hits[idx]["ticker"], "KRW")
+        else:
+            st.caption("국내 목록에 없습니다. 미국 종목이면 아래 표에 티커(예: AAPL)를 직접 입력하세요.")
 
 
 # ---------- 거래 입력 표 ----------
@@ -311,8 +345,9 @@ edit_df["date"] = pd.to_datetime(edit_df["date"], errors="coerce")
 edit_df["price"] = pd.to_numeric(edit_df["price"], errors="coerce")
 edit_df["shares"] = pd.to_numeric(edit_df["shares"], errors="coerce")
 
+editor_key = f"editor_{st.session_state.get('editor_ver', 0)}"
 edited = st.data_editor(
-    edit_df, num_rows="dynamic", width="stretch", key="editor",
+    edit_df, num_rows="dynamic", width="stretch", key=editor_key,
     column_config={
         "date": st.column_config.DateColumn("날짜", format="YYYY-MM-DD", required=True),
         "time": st.column_config.TextColumn("시각", help="HH:MM (24시간)", default="09:30"),
@@ -320,7 +355,7 @@ edited = st.data_editor(
         "side": st.column_config.SelectboxColumn(
             "구분", options=["BUY", "SELL", "DEPOSIT", "WITHDRAW"], required=True, default="BUY"),
         "price": st.column_config.NumberColumn(
-            "가격/금액", help="매매는 체결가, 입금·출금은 금액", min_value=0.0, format="%.2f", required=True),
+            "가격/금액", help="매매는 체결가, 입금·출금은 금액", min_value=0.0, required=True),
         "shares": st.column_config.NumberColumn("수량(주)", help="입금·출금은 비워두세요", min_value=0.0, format="%g"),
         "currency": st.column_config.SelectboxColumn(
             "통화", options=["USD", "KRW"], help="입금·출금 통화(매매는 티커로 자동)", default="USD"),

@@ -31,13 +31,18 @@ print("=== 매매일지 smoke test ===")
 # 1) import
 try:
     import journal_core as jc
+    import krx
     import prices  # noqa: F401
     import sheets  # noqa: F401
-    check("import journal_core / prices / sheets", True)
+    check("import journal_core / krx / prices / sheets", True)
 except Exception as exc:  # noqa: BLE001
-    check("import journal_core / prices / sheets", False, repr(exc))
+    check("import journal_core / krx / prices / sheets", False, repr(exc))
     print("\n임포트 실패 — 이후 검사 생략.")
     sys.exit(1)
+
+# 국내 티커 변환 (네트워크 불필요)
+check("to_yf_ticker KOSPI→.KS", krx.to_yf_ticker("005930", "KOSPI") == "005930.KS")
+check("to_yf_ticker KOSDAQ→.KQ", krx.to_yf_ticker("277810", "KOSDAQ") == "277810.KQ")
 
 # 2) 코어 검산 (가격 None = 거래 이벤트 점만)
 sample = [

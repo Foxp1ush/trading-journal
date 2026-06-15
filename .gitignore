@@ -1,0 +1,18 @@
+# 비밀: 서비스 계정 크레덴셜 — 절대 커밋 금지 (클라우드는 Secrets UI 사용)
+.streamlit/secrets.toml
+service_account.json
+trading-journal-*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / 에디터
+.DS_Store
+.vscode/
+.idea/
+
+# 로컬 실행 로그
+streamlit.log

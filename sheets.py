@@ -3,7 +3,7 @@
 사용자는 자기 소유 시트를 서비스 계정 이메일에 '편집' 공유한 뒤 URL을 앱에 붙여넣는다.
 비공개·영속성은 사용자 본인 구글 계정이 책임(앱은 공유된 시트에만 접근).
 
-거래 컬럼: date, time, ticker, side, price, shares (워크시트명 'trades').
+거래 컬럼: date, time, ticker, side, price, shares, currency, tag, note (워크시트명 'trades').
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import streamlit as st
 from google.oauth2.service_account import Credentials
 
 WORKSHEET = "trades"
-HEADER = ["date", "time", "ticker", "side", "price", "shares", "currency"]
+HEADER = ["date", "time", "ticker", "side", "price", "shares", "currency", "tag", "note"]
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
@@ -97,7 +97,7 @@ def load_trades(ws: gspread.Worksheet) -> pd.DataFrame:
     )
     for col in ("price", "shares"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    for col in ("date", "time", "ticker", "side"):
+    for col in ("date", "time", "ticker", "side", "tag", "note"):
         df[col] = df[col].astype(str).replace({"nan": "", "None": ""})
     return df
 

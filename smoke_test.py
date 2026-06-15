@@ -147,9 +147,11 @@ check("_trade_markers y=실현+(가격−평단)×보유 (매수점=0)",
       abs(float(_mk.iloc[0]["값"])) < 1e-9, f"{None if _mk.empty else _mk.iloc[0]['값']}")
 
 # build_manual_row (빠른 입력 검증)
-_row, _err = app.build_manual_row("2026-06-01", "09:30", "aapl", "BUY", 150.0, 10.0, "USD")
-check("build_manual_row 매매 정상(티커 대문자·수량)",
-      _err == "" and _row and _row["ticker"] == "AAPL" and _row["shares"] == 10.0, f"{_err}")
+_row, _err = app.build_manual_row("2026-06-01", "09:30", "aapl", "BUY", 150.0, 10.0, "USD", "계획", "분할매수")
+check("build_manual_row 매매 정상(티커 대문자·수량·태그·메모)",
+      _err == "" and _row and _row["ticker"] == "AAPL" and _row["shares"] == 10.0
+      and _row["tag"] == "계획" and _row["note"] == "분할매수" and set(_row) == set(sheets.HEADER),
+      f"{_err}")
 _crow, _cerr = app.build_manual_row("2026-06-01", "", "", "DEPOSIT", 1000.0, None, "KRW")
 check("build_manual_row 현금: 티커 무시·shares None",
       _cerr == "" and _crow and _crow["ticker"] == "" and _crow["shares"] is None, f"{_cerr}")
@@ -165,6 +167,23 @@ check("prepare_edit_df date=datetime · price=numeric dtype",
       str(_seed["date"].dtype).startswith("datetime") and "float" in str(_seed["price"].dtype),
       f"{_seed['date'].dtype}, {_seed['price'].dtype}")
 
+# 태그별 매매 피드백 — 계획 매도 이익(+), 충동 매도 손실(−)
+_tagres = jc.process_portfolio([
+    {"date": "2026-06-01", "time": "09:30", "ticker": "T", "side": "BUY", "price": 100, "shares": 10, "tag": "계획"},
+    {"date": "2026-06-02", "time": "09:30", "ticker": "T", "side": "SELL", "price": 120, "shares": 10, "tag": "계획"},   # +200
+    {"date": "2026-06-03", "time": "09:30", "ticker": "U", "side": "BUY", "price": 50, "shares": 10, "tag": "충동"},
+    {"date": "2026-06-04", "time": "09:30", "ticker": "U", "side": "SELL", "price": 40, "shares": 10, "tag": "충동"},    # −100
+])
+_perf = jc.tag_performance(_tagres)
+_byt = {r["태그"]: r for r in _perf.to_dict("records")}
+check("tag_performance 계획 실현 +200·승률100",
+      abs(_byt["계획"]["실현손익"] - 200) < 1e-6 and _byt["계획"]["승률%"] == 100.0, f"{_byt.get('계획')}")
+check("tag_performance 충동 실현 −100·승률0",
+      abs(_byt["충동"]["실현손익"] + 100) < 1e-6 and _byt["충동"]["승률%"] == 0.0, f"{_byt.get('충동')}")
+check("tag_performance 매매횟수=매수+매도(계획 2)", _byt["계획"]["매매횟수"] == 2, f"{_byt['계획']['매매횟수']}")
+app._tag_bar(_perf, "USD").to_dict()  # Altair 스펙 유효성(예외 없으면 통과)
+check("_tag_bar Altair 스펙 빌드 OK", True)
+
 # 3) 앱 부팅 (AppTest) — exception 0
 try:
     from streamlit.testing.v1 import AppTest
@@ -178,7 +197,7 @@ except Exception as exc:  # noqa: BLE001
 try:
     from streamlit.testing.v1 import AppTest
     _cash_only = _pd.DataFrame([
-        {"date": "2026-06-01", "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 1000.0, "shares": None, "currency": "USD"},
+        {"date": "2026-06-01", "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 1000.0, "shares": None, "currency": "USD", "tag": "", "note": "월급"},
     ])
     at3 = AppTest.from_file("journal_app.py", default_timeout=60)
     at3.session_state["ws_ok"] = True

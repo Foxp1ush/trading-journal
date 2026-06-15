@@ -39,6 +39,7 @@ class Txn(TypedDict):
     price: float
     shares: float
     currency: str  # 'USD'|'KRW' — 현금 거래에서 사용(매매는 티커로 자동)
+    tag: str       # 매매 사유 분류(계획/충동/패닉 등). 손익 계산엔 무관, 태그별 통계용
 
 
 # ---------- 통화 ----------
@@ -76,6 +77,8 @@ class ProcessedRow:
     avg_cost: float
     realized_pnl: float
     note: str = ""
+    tag: str = ""           # 매매 사유 분류(태그별 통계용)
+    realized_delta: float = 0.0  # 이 거래에서 발생한 실현손익(매도만 양/음, 매수·현금=0)
 
 
 @dataclass
@@ -129,12 +132,14 @@ def process_transactions(txns: list[Txn], ticker: str = "") -> JournalResult:
         side = str(t["side"]).upper()
         price = float(t["price"])
         shares = float(t["shares"])
+        tag = str(t.get("tag", "") or "")
         note = ""
+        delta = 0.0
 
         if price <= 0 or shares <= 0:
             note = "가격·수량은 0보다 커야 함 — 건너뜀"
             warnings.append(f"{ts:%Y-%m-%d %H:%M} {side}: {note}")
-            rows.append(ProcessedRow(ts, side, price, 0.0, pos, avg_cost, realized, note))
+            rows.append(ProcessedRow(ts, side, price, 0.0, pos, avg_cost, realized, note, tag))
             continue
 
         if side == BUY:
@@ -147,7 +152,8 @@ def process_transactions(txns: list[Txn], ticker: str = "") -> JournalResult:
             if filled < shares:
                 note = f"보유 {pos:g}주 초과 매도 {shares - filled:g}주 무시"
                 warnings.append(f"{ts:%Y-%m-%d %H:%M} SELL: {note}")
-            realized += (price - avg_cost) * filled
+            delta = (price - avg_cost) * filled  # 평단 리셋 전에 캡처
+            realized += delta
             pos -= filled
             if pos <= 1e-9:
                 pos = 0.0
@@ -155,10 +161,10 @@ def process_transactions(txns: list[Txn], ticker: str = "") -> JournalResult:
         else:
             note = f"알 수 없는 구분 '{t['side']}' — 건너뜀"
             warnings.append(f"{ts:%Y-%m-%d %H:%M}: {note}")
-            rows.append(ProcessedRow(ts, side, price, 0.0, pos, avg_cost, realized, note))
+            rows.append(ProcessedRow(ts, side, price, 0.0, pos, avg_cost, realized, note, tag))
             continue
 
-        rows.append(ProcessedRow(ts, side, price, filled, pos, avg_cost, realized, note))
+        rows.append(ProcessedRow(ts, side, price, filled, pos, avg_cost, realized, note, tag, delta))
 
     return JournalResult(
         ticker=ticker, rows=rows, position_shares=pos, avg_cost=avg_cost,
@@ -280,6 +286,41 @@ def portfolio_summary(
             "수익률%": ret,
         })
     return pd.DataFrame(recs)
+
+
+def tag_performance(results: dict[str, JournalResult]) -> pd.DataFrame:
+    """태그별 매매 통계(통화 1버킷). 빈도는 매수·매도 모두, 실현손익은 매도 시점 태그 기준.
+
+    컬럼: 태그/매매횟수/매도횟수/실현손익/평균실현/승률%. 빈 태그는 '미분류'.
+    """
+    agg: dict[str, dict] = {}
+    for res in results.values():
+        for r in res.rows:
+            if str(r.side).upper() not in (BUY, SELL) or r.shares <= 0:
+                continue  # 현금·스킵·미체결 제외
+            key = r.tag or "미분류"
+            a = agg.setdefault(key, {"매매횟수": 0, "매도횟수": 0, "실현손익": 0.0, "_wins": 0})
+            a["매매횟수"] += 1
+            if str(r.side).upper() == SELL:
+                a["매도횟수"] += 1
+                a["실현손익"] += r.realized_delta
+                if r.realized_delta > 0:
+                    a["_wins"] += 1
+    recs = []
+    for tag, a in agg.items():
+        sells = a["매도횟수"]
+        recs.append({
+            "태그": tag,
+            "매매횟수": a["매매횟수"],
+            "매도횟수": sells,
+            "실현손익": a["실현손익"],
+            "평균실현": (a["실현손익"] / sells) if sells else 0.0,
+            "승률%": (a["_wins"] / sells * 100.0) if sells else float("nan"),
+        })
+    df = pd.DataFrame(recs)
+    if not df.empty:
+        df = df.sort_values("실현손익").reset_index(drop=True)  # 손실 태그가 위로
+    return df
 
 
 # ---------- 현금 / 계좌가치 (입출금 포함) ----------

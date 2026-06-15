@@ -37,13 +37,16 @@ st.caption(
 # ---------- 입력 스키마/상수 ----------
 # 컬럼 스키마·현금 구분은 단일 출처(sheets.HEADER / journal_core.CASH_SIDES)를 재사용한다.
 
+# 매매 사유 태그(심리 피드백 분류). 빈 값=미분류.
+TAGS = ["", "계획", "추격", "충동", "패닉", "분할", "리밸런싱", "기타"]
+
 TEMPLATE_CSV = (
-    "date,time,ticker,side,price,shares,currency\n"
-    "2026-06-01,09:00,,DEPOSIT,1000,,USD\n"
-    "2026-06-01,09:30,AAPL,BUY,150,10,USD\n"
-    "2026-06-02,14:00,AAPL,SELL,160,4,USD\n"
-    "2026-06-03,09:05,,DEPOSIT,1000000,,KRW\n"
-    "2026-06-03,09:30,005930.KS,BUY,70000,10,KRW\n"
+    "date,time,ticker,side,price,shares,currency,tag,note\n"
+    "2026-06-01,09:00,,DEPOSIT,1000,,USD,,월급 입금\n"
+    "2026-06-01,09:30,AAPL,BUY,150,10,USD,계획,실적 기대 분할매수1\n"
+    "2026-06-02,14:00,AAPL,SELL,160,4,USD,계획,목표가 도달 일부 익절\n"
+    "2026-06-03,09:05,,DEPOSIT,1000000,,KRW,,\n"
+    "2026-06-03,09:30,005930.KS,BUY,70000,10,KRW,추격,급등 따라 매수\n"
 )
 
 
@@ -206,6 +209,7 @@ def df_to_txns(df: pd.DataFrame | None) -> list[dict]:
         base = {
             "date": pd.Timestamp(d).strftime("%Y-%m-%d"),
             "time": str(row.get("time") or "09:30"),
+            "tag": str(row.get("tag") or ""),
         }
         if side in jc.CASH_SIDES:
             txns.append({**base, "ticker": "", "side": side,
@@ -219,10 +223,11 @@ def df_to_txns(df: pd.DataFrame | None) -> list[dict]:
 
 
 def build_manual_row(d, time: str, ticker: str, side: str,
-                     price, shares, ccy: str) -> tuple[dict | None, str]:
+                     price, shares, ccy: str, tag: str = "", note: str = "") -> tuple[dict | None, str]:
     """빠른 입력 폼 한 건을 검증해 시트 1행(sheets.HEADER 모양) 또는 (None, 에러문구) 반환.
 
     가격>0 필수. 매매(BUY/SELL)는 티커·수량(>0) 필수. 현금(DEPOSIT/WITHDRAW)은 티커/수량 무시.
+    tag/note는 메타데이터(검증 없음).
     """
     side = str(side or "").upper()
     if price is None or float(price) <= 0:
@@ -242,6 +247,8 @@ def build_manual_row(d, time: str, ticker: str, side: str,
         "price": float(price),
         "shares": (None if cash else float(shares)),
         "currency": str(ccy or "USD").upper(),
+        "tag": str(tag or ""),
+        "note": str(note or ""),
     }
     return row, ""
 
@@ -251,13 +258,14 @@ def prepare_edit_df(loaded: pd.DataFrame | None) -> pd.DataFrame:
     if loaded is None or len(loaded) == 0:
         today = date.today()
         loaded = pd.DataFrame([
-            {"date": str(today), "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 1000.0, "shares": None, "currency": "USD"},
-            {"date": str(today), "time": "09:30", "ticker": "AAPL", "side": "BUY", "price": 150.0, "shares": 10.0, "currency": "USD"},
+            {"date": str(today), "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 1000.0, "shares": None, "currency": "USD", "tag": "", "note": ""},
+            {"date": str(today), "time": "09:30", "ticker": "AAPL", "side": "BUY", "price": 150.0, "shares": 10.0, "currency": "USD", "tag": "계획", "note": ""},
         ])
     edit_df = loaded.copy()
-    if "currency" not in edit_df.columns:
-        edit_df["currency"] = "USD"
-    for c in ("ticker", "side", "time", "currency"):
+    for c in ("currency", "tag", "note"):
+        if c not in edit_df.columns:
+            edit_df[c] = "USD" if c == "currency" else ""
+    for c in ("ticker", "side", "time", "currency", "tag", "note"):
         if c in edit_df.columns:
             edit_df[c] = edit_df[c].astype(str).replace({"nan": "", "None": ""})
     edit_df["currency"] = edit_df["currency"].replace({"": "USD"}).str.upper()
@@ -376,6 +384,44 @@ def _pnl_curves(ccy: str, results: dict, price_frames: dict) -> None:
         st.dataframe(audit, width="stretch")
 
 
+def _tag_bar(perf: pd.DataFrame, ccy: str) -> alt.Chart:
+    """태그별 실현손익 막대(양수 초록/음수 빨강)."""
+    return (
+        alt.Chart(perf)
+        .mark_bar()
+        .encode(
+            x=alt.X("실현손익:Q", title=f"실현손익 ({ccy})"),
+            y=alt.Y("태그:N", sort="-x", title=None),
+            color=alt.condition(alt.datum["실현손익"] >= 0, alt.value("#2ca02c"), alt.value("#d62728")),
+            tooltip=["태그:N", "매매횟수:Q", "매도횟수:Q",
+                     alt.Tooltip("실현손익:Q", format="+,.2f"),
+                     alt.Tooltip("평균실현:Q", format="+,.2f"),
+                     alt.Tooltip("승률%:Q", format=".0f")],
+        )
+        .properties(height=max(120, 34 * len(perf)))
+    )
+
+
+def _tag_feedback(ccy: str, results: dict) -> None:
+    """🧠 태그별 매매 피드백 — 사유 태그별 빈도·실현손익·승률(심리 패턴 직면)."""
+    perf = jc.tag_performance(results)
+    if perf.empty:
+        return
+    st.subheader("🧠 태그별 매매 피드백")
+    st.caption(
+        "매매 사유 태그별 통계입니다. **실현손익은 매도 시점 태그 기준**(평단 방식상 매수 태그엔 실현 귀속 불가), "
+        "**매매횟수**는 매수·매도 모두. 충동·패닉 등 어떤 마음가짐이 돈을 버는지/잃는지 직면하세요. "
+        "(메모 원문은 📜 히스토리 탭)"
+    )
+    st.altair_chart(_tag_bar(perf, ccy), width="stretch")
+
+    signed = "{:+,.0f}" if ccy == "KRW" else "{:+,.2f}"
+    st.dataframe(
+        perf.style.format({"실현손익": signed, "평균실현": signed, "승률%": "{:.0f}"}, na_rep="—"),
+        width="stretch",
+    )
+
+
 def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
     """한 통화(USD 또는 KRW)의 계좌·손익 섹션 전체를 렌더(블록 헬퍼 조립)."""
     st.header(CCY_LABEL.get(ccy, f"{ccy} 계좌"))
@@ -398,6 +444,7 @@ def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
 
     _pnl_table(ccy, results, last_closes)
     _pnl_curves(ccy, results, price_frames)
+    _tag_feedback(ccy, results)
 
 
 # ---------- 매매 기록 입력 (Tab 2 — fragment로 격리) ----------
@@ -409,11 +456,13 @@ def _quick_add_form() -> None:
     if "qa_prefill_ticker" in st.session_state:
         st.session_state["qa_ticker"] = st.session_state.pop("qa_prefill_ticker")
         st.session_state["qa_currency"] = st.session_state.pop("qa_prefill_ccy", "USD")
-    # 직전 추가 성공 → 티커·가격·수량만 비움(날짜·구분·통화는 연속 입력 위해 유지)
+    # 직전 추가 성공 → 티커·가격·수량·태그·메모만 비움(날짜·구분·통화는 연속 입력 위해 유지)
     if st.session_state.pop("qa_clear", False):
         st.session_state["qa_ticker"] = ""
         st.session_state["qa_price"] = None
         st.session_state["qa_shares"] = None
+        st.session_state["qa_tag"] = ""
+        st.session_state["qa_note"] = ""
 
     st.subheader("➕ 새 거래 추가")
     st.caption(
@@ -431,10 +480,14 @@ def _quick_add_form() -> None:
                                   placeholder="예: AAPL, 005930.KS (입금·출금은 비움)")
         price = r2[1].number_input("가격/금액", min_value=0.0, value=None, key="qa_price")
         shares = r2[2].number_input("수량(주)", min_value=0.0, value=None, key="qa_shares")
+        r3 = st.columns([1, 2.6])
+        tag = r3[0].selectbox("태그(사유)", TAGS, key="qa_tag",
+                              format_func=lambda x: x or "(미분류)")
+        note = r3[1].text_input("메모", key="qa_note", placeholder="왜 샀/팔았는지 — 근거·심리 메모(선택)")
         added = st.form_submit_button("➕ 추가 (즉시 저장)", type="primary")
 
     if added:
-        row, err = build_manual_row(d, t, ticker, side, price, shares, ccy)
+        row, err = build_manual_row(d, t, ticker, side, price, shares, ccy, tag, note)
         if err:
             st.error(err)
             return
@@ -475,8 +528,8 @@ def _csv_import() -> None:
     """CSV 업로드 → 전체 표(draft)에 채움(확정은 전체 표에서 저장)."""
     st.caption(
         "양식 CSV를 받아 채운 뒤 업로드하면 아래 '전체 거래' 표에 채워집니다(여러 건 한 번에). "
-        "컬럼: date,time,ticker,side,price,shares,currency. 입금·출금은 ticker 비우고 "
-        "side=DEPOSIT/WITHDRAW, price=금액. 국내 주식은 005930.KS/.KQ 코드."
+        "컬럼: date,time,ticker,side,price,shares,currency,tag,note. 입금·출금은 ticker 비우고 "
+        "side=DEPOSIT/WITHDRAW, price=금액. tag/note는 비워도 됩니다. 국내 주식은 005930.KS/.KQ 코드."
     )
     st.download_button("양식 CSV 받기", TEMPLATE_CSV, file_name="trades_template.csv", mime="text/csv")
     up = st.file_uploader("CSV 업로드", type=["csv"], key="csv_up")
@@ -521,6 +574,9 @@ def _full_table_editor() -> None:
                 "shares": st.column_config.NumberColumn("수량(주)", help="입금·출금은 비워두세요", min_value=0.0, format="%g"),
                 "currency": st.column_config.SelectboxColumn(
                     "통화", options=["USD", "KRW"], help="입금·출금 통화(매매는 티커로 자동)", default="USD"),
+                "tag": st.column_config.SelectboxColumn(
+                    "태그", options=TAGS, help="매매 사유(계획/충동/패닉 등) — 태그별 통계용", default=""),
+                "note": st.column_config.TextColumn("메모", help="근거·심리 메모(선택)"),
             },
         )
         submitted = st.form_submit_button("💾 저장", type="primary")

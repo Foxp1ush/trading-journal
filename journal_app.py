@@ -50,8 +50,11 @@ TEMPLATE_CSV = (
 
 # ---------- 차트 ----------
 
-def _line_with_zero(df: pd.DataFrame, y_title: str) -> alt.LayerChart:
-    """누적손익 라인 + Y=0 기준선 + 호버 안내선 + 휠 줌."""
+_PNL_AUTOSIZE = {"type": "fit-y", "contains": "padding"}
+
+
+def _pnl_layer_list(df: pd.DataFrame, y_title: str) -> list[alt.Chart]:
+    """누적손익 라인 + Y=0 기준선 + 호버 안내선의 개별 레이어들(평면 layer용)."""
     long = (
         df.rename_axis("날짜").reset_index()
         .melt(id_vars="날짜", var_name="계열", value_name="값")
@@ -81,9 +84,53 @@ def _line_with_zero(df: pd.DataFrame, y_title: str) -> alt.LayerChart:
     )
     zero = alt.Chart(pd.DataFrame({"y": [0.0]})).mark_rule(
         color="#333", strokeWidth=2.5).encode(y="y:Q")
-    return alt.layer(line, zero, points, guide).properties(
-        height=360, autosize={"type": "fit-y", "contains": "padding"}
+    return [line, zero, points, guide]
+
+
+def _line_with_zero(df: pd.DataFrame, y_title: str) -> alt.LayerChart:
+    """누적손익 라인 + Y=0 기준선 + 호버 안내선 + 휠 줌."""
+    return alt.layer(*_pnl_layer_list(df, y_title)).properties(
+        height=360, autosize=_PNL_AUTOSIZE
     )
+
+
+def _trade_markers(rows) -> pd.DataFrame:
+    """누적손익 곡선에 얹을 매수/매도 마커 데이터. 실제 체결된 매매행만(현금·미체결 제외).
+
+    y값은 build_pnl_curve의 거래 이벤트 점과 동일 공식 → 라인 위 정확한 위치에 안착.
+    """
+    recs = []
+    for r in rows:
+        s = str(r.side).upper()
+        if s not in ("BUY", "SELL") or r.shares <= 0:
+            continue
+        y = r.realized_pnl + (r.price - r.avg_cost) * r.position_shares
+        recs.append({"날짜": r.ts, "값": y, "거래": "매수" if s == "BUY" else "매도",
+                     "가격": r.price, "수량": r.shares})
+    return pd.DataFrame(recs)
+
+
+def _pnl_chart_with_trades(detail_df: pd.DataFrame, rows, y_title: str) -> alt.LayerChart:
+    """종목별 누적손익 라인 + 매수(초록 ▲)·매도(빨강 ▼) 시점 마커."""
+    layers = _pnl_layer_list(detail_df, y_title)
+    mk = _trade_markers(rows)
+    if not mk.empty:
+        layers.append(
+            alt.Chart(mk)
+            .mark_point(size=140, filled=True, opacity=0.95, stroke="white", strokeWidth=1)
+            .encode(
+                x="날짜:T", y="값:Q",
+                color=alt.Color("거래:N", title="거래",
+                                scale=alt.Scale(domain=["매수", "매도"], range=["#2ca02c", "#d62728"])),
+                shape=alt.Shape("거래:N", title="거래",
+                                scale=alt.Scale(domain=["매수", "매도"], range=["triangle-up", "triangle-down"])),
+                tooltip=[alt.Tooltip("날짜:T", title="시점"), alt.Tooltip("거래:N", title="구분"),
+                         alt.Tooltip("가격:Q", title="체결가", format=",.2f"),
+                         alt.Tooltip("수량:Q", title="수량", format="g"),
+                         alt.Tooltip("값:Q", title="누적손익", format="+.2f")],
+            )
+        )
+    return alt.layer(*layers).properties(height=360, autosize=_PNL_AUTOSIZE)
 
 
 def _line_chart(df: pd.DataFrame, y_title: str) -> alt.Chart:
@@ -284,7 +331,7 @@ def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
     detail = jc.build_pnl_curve(res.rows, price_frames.get(pick))
     if not detail.empty:
         st.altair_chart(
-            _line_with_zero(detail.rename(columns={"누적손익": pick}), f"누적손익 ({ccy})"),
+            _pnl_chart_with_trades(detail.rename(columns={"누적손익": pick}), res.rows, f"누적손익 ({ccy})"),
             width="stretch",
         )
     for w in res.warnings:

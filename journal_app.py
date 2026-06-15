@@ -257,16 +257,20 @@ def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
     m[0].metric("실현손익 합계", fmt_money(summary["실현손익"].sum(), ccy))
     m[1].metric("미실현손익 합계", fmt_money(summary["미실현손익"].sum(), ccy))
     m[2].metric("총손익 합계", fmt_money(summary["총손익"].sum(), ccy))
-    tot_cost = summary["매수금액"].sum()
+    tot_cost = summary["누적매수금액"].sum()
     tot_ret = (summary["총손익"].sum() / tot_cost * 100.0) if tot_cost > 0 else 0.0
-    m[3].metric("수익률", f"{tot_ret:+.2f}%", help="총손익 합계 / 누적 매수금액")
+    m[3].metric("수익률", f"{tot_ret:+.2f}%", help="총손익 합계 / 누적 매수금액(매도분 포함)")
 
     money = "{:,.0f}" if ccy == "KRW" else "{:,.2f}"
     signed = "{:+,.0f}" if ccy == "KRW" else "{:+,.2f}"
+    st.caption(
+        "**보유원가** = 현재 보유수량 × 평단(지금 들고 있는 물량 원가). "
+        "**누적매수금액** = 지금까지 매수에 쓴 총액(이미 판 물량 포함, 수익률 분모)."
+    )
     st.dataframe(
         summary.style.format({
-            "보유수량": "{:g}", "평균단가": money, "실현손익": signed,
-            "미실현손익": signed, "총손익": signed, "매수금액": money, "수익률%": "{:+.2f}",
+            "보유수량": "{:g}", "평균단가": money, "보유원가": money, "실현손익": signed,
+            "미실현손익": signed, "총손익": signed, "누적매수금액": money, "수익률%": "{:+.2f}",
         }),
         width="stretch",
     )

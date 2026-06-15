@@ -256,7 +256,12 @@ def portfolio_summary(
     results: dict[str, JournalResult],
     last_closes: dict[str, float | None],
 ) -> pd.DataFrame:
-    """종목별 요약 표. 컬럼: 보유수량/평균단가/실현손익/미실현손익/총손익/매수금액/수익률%."""
+    """종목별 요약 표.
+
+    컬럼: 보유수량/평균단가/보유원가/실현손익/미실현손익/총손익/누적매수금액/수익률%.
+    - 보유원가 = 현재 보유수량 × 평단 (지금 들고 있는 물량의 원가).
+    - 누적매수금액 = Σ(매수 가격×수량) — 이미 팔린 물량 포함. 수익률 분모.
+    """
     recs = []
     for tk, res in results.items():
         lc = last_closes.get(tk)
@@ -267,10 +272,11 @@ def portfolio_summary(
             "티커": tk,
             "보유수량": res.position_shares,
             "평균단가": res.avg_cost,
+            "보유원가": res.position_shares * res.avg_cost,
             "실현손익": res.realized_pnl,
             "미실현손익": unreal,
             "총손익": total,
-            "매수금액": res.total_buy_cost,
+            "누적매수금액": res.total_buy_cost,
             "수익률%": ret,
         })
     return pd.DataFrame(recs)

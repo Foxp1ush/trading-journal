@@ -35,9 +35,8 @@ st.caption(
 
 
 # ---------- 입력 스키마/상수 ----------
+# 컬럼 스키마·현금 구분은 단일 출처(sheets.HEADER / journal_core.CASH_SIDES)를 재사용한다.
 
-CASH_SIDES = {"DEPOSIT", "WITHDRAW"}
-SCHEMA_COLS = ["date", "time", "ticker", "side", "price", "shares", "currency"]
 TEMPLATE_CSV = (
     "date,time,ticker,side,price,shares,currency\n"
     "2026-06-01,09:00,,DEPOSIT,1000,,USD\n"
@@ -155,7 +154,7 @@ def _line_chart(df: pd.DataFrame, y_title: str) -> alt.Chart:
                      alt.Tooltip(f"{col}:Q", title=y_title, format=",.0f")],
         )
         .add_params(zoom)
-        .properties(height=320, autosize={"type": "fit-y", "contains": "padding"})
+        .properties(height=320, autosize=_PNL_AUTOSIZE)
     )
 
 
@@ -208,7 +207,7 @@ def df_to_txns(df: pd.DataFrame | None) -> list[dict]:
             "date": pd.Timestamp(d).strftime("%Y-%m-%d"),
             "time": str(row.get("time") or "09:30"),
         }
-        if side in CASH_SIDES:
+        if side in jc.CASH_SIDES:
             txns.append({**base, "ticker": "", "side": side,
                          "price": float(price), "shares": 0.0, "currency": ccy})
         else:  # BUY / SELL — 티커·수량 필요 (통화는 티커로 자동 판정)
@@ -254,25 +253,17 @@ def append_row(ticker: str, ccy: str) -> None:
     st.rerun(scope="fragment")
 
 
-def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
-    """한 통화(USD 또는 KRW)의 계좌·손익 섹션을 통째로 렌더. 단일통화라 기존 함수 그대로 사용."""
-    st.header(CCY_LABEL.get(ccy, f"{ccy} 계좌"))
-
-    results = jc.process_portfolio(ccy_txns)
-    price_frames = {tk: prices.get_prices(tk) for tk in results}
-    last_closes = {tk: prices.latest_close(price_frames[tk]) for tk in results}
-    account = jc.current_account(ccy_txns, last_closes)
-
-    missing = [tk for tk in results if last_closes[tk] is None]
-    if missing:
-        st.warning(f"시세를 못 받은 종목(평가 0 처리): {', '.join(missing)}")
-
-    # 계좌 요약
+def _account_metrics(ccy: str, account: dict) -> None:
+    """계좌가치·현금잔고·보유시가 3-metric."""
     a = st.columns(3)
     a[0].metric("계좌가치", fmt_money(account["account_value"], ccy), help="현금 + 보유 시가평가")
     a[1].metric("현금잔고", fmt_money(account["cash"], ccy), help="입금·매도 − 출금·매수")
     a[2].metric("보유 시가", fmt_money(account["holdings_value"], ccy))
 
+
+def _allocation_and_value(ccy: str, ccy_txns: list[dict], account: dict,
+                          price_frames: dict) -> None:
+    """자산배분 도넛 + 계좌가치 추이 곡선(기간 필터)."""
     col_pie, col_curve = st.columns([1, 2])
     with col_pie:
         st.caption("자산배분")
@@ -298,11 +289,9 @@ def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
             change = float(win["계좌가치"].iloc[-1] - win["계좌가치"].iloc[0])
             st.metric("선택 기간 계좌가치 변화", fmt_money(change, ccy))
 
-    if not results:
-        st.info("이 통화의 매매 기록이 없습니다(현금 거래만).")
-        return
 
-    # 매매 손익
+def _pnl_table(ccy: str, results: dict, last_closes: dict) -> None:
+    """종목별 손익 요약 metric + 표(KRW는 한글 종목명 병기)."""
     st.subheader("매매 손익 — 종목별")
     summary = jc.portfolio_summary(results, last_closes)
     if ccy == "KRW" and "티커" in summary.columns:  # 한글 종목명 병기(표시용)
@@ -329,6 +318,9 @@ def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
         width="stretch",
     )
 
+
+def _pnl_curves(ccy: str, results: dict, price_frames: dict) -> None:
+    """통화 전체 누적손익 곡선 + 선택 종목 상세(매수/매도 마커) + 거래 처리 내역."""
     curve = jc.portfolio_pnl_curve(results, price_frames)
     if not curve.empty:
         st.altair_chart(_line_with_zero(curve, f"누적손익 ({ccy})"), width="stretch")
@@ -353,6 +345,30 @@ def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
             for r in res.rows
         ])
         st.dataframe(audit, width="stretch")
+
+
+def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
+    """한 통화(USD 또는 KRW)의 계좌·손익 섹션 전체를 렌더(블록 헬퍼 조립)."""
+    st.header(CCY_LABEL.get(ccy, f"{ccy} 계좌"))
+
+    results = jc.process_portfolio(ccy_txns)
+    price_frames = {tk: prices.get_prices(tk) for tk in results}
+    last_closes = {tk: prices.latest_close(price_frames[tk]) for tk in results}
+    account = jc.current_account(ccy_txns, last_closes)
+
+    missing = [tk for tk in results if last_closes[tk] is None]
+    if missing:
+        st.warning(f"시세를 못 받은 종목(평가 0 처리): {', '.join(missing)}")
+
+    _account_metrics(ccy, account)
+    _allocation_and_value(ccy, ccy_txns, account, price_frames)
+
+    if not results:
+        st.info("이 통화의 매매 기록이 없습니다(현금 거래만).")
+        return
+
+    _pnl_table(ccy, results, last_closes)
+    _pnl_curves(ccy, results, price_frames)
 
 
 # ---------- 매매 기록 입력 (Tab 2 — fragment로 격리) ----------
@@ -389,11 +405,11 @@ def record_fragment() -> None:
         if up is not None:
             try:
                 imported = pd.read_csv(up, dtype=str)
-                missing = [c for c in SCHEMA_COLS if c not in imported.columns]
+                missing = [c for c in sheets.HEADER if c not in imported.columns]
                 if missing:
                     st.error(f"필수 컬럼 누락: {missing} — 양식 CSV를 사용하세요.")
                 else:
-                    imported = imported[SCHEMA_COLS]
+                    imported = imported[sheets.HEADER]
                     st.dataframe(imported, width="stretch")
                     if st.button("이 데이터로 채우기", key="csv_apply"):
                         st.session_state["draft_df"] = imported

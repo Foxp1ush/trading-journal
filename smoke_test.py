@@ -122,6 +122,36 @@ check("USD 계좌가치 =2100 (500+10×160)", abs(usd_acc["account_value"] - 210
 check("KRW 현금 =300000 (100만−70만)", abs(krw_acc["cash"] - 300000) < 1e-6, f"{krw_acc['cash']}")
 check("KRW 계좌가치 =1,020,000 (30만+10×72000)", abs(krw_acc["account_value"] - 1020000) < 1e-6, f"{krw_acc['account_value']}")
 
+# journal_app 표시 헬퍼 회귀 (네트워크 불필요)
+import journal_app as app  # noqa: E402 — 코어 검산 뒤 임포트
+
+# loaded_df 모양(가격·수량 numeric, 빈칸은 NaN) — df_to_txns의 실제 입력과 동일
+_df = _pd.DataFrame([
+    {"date": "2026-06-01", "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 1000.0, "shares": None, "currency": "USD"},
+    {"date": "2026-06-01", "time": "09:30", "ticker": "aapl", "side": "BUY", "price": 150.0, "shares": 10.0, "currency": "USD"},
+    {"date": "2026-06-02", "time": "", "ticker": "MSFT", "side": "BUY", "price": None, "shares": 5.0, "currency": "USD"},  # 가격 없음 → 스킵
+])
+_tx = app.df_to_txns(_df)
+check("df_to_txns 현금+매매 2건(빈 가격행 스킵)", len(_tx) == 2, f"{len(_tx)}")
+check("df_to_txns 티커 대문자 정규화", _tx[1]["ticker"] == "AAPL", f"{_tx[1]['ticker']}")
+check("df_to_txns 현금행 ticker 빈문자", _tx[0]["ticker"] == "" and _tx[0]["side"] == "DEPOSIT")
+
+_mres = jc.process_portfolio([
+    {"date": "2026-06-01", "time": "09:30", "ticker": "X", "side": "BUY", "price": 10, "shares": 10},
+    {"date": "2026-06-02", "time": "09:30", "ticker": "X", "side": "SELL", "price": 12, "shares": 4},
+])["X"]
+_mk = app._trade_markers(_mres.rows)
+check("_trade_markers 매수·매도 2개", len(_mk) == 2 and set(_mk["거래"]) == {"매수", "매도"},
+      f"{None if _mk.empty else list(_mk['거래'])}")
+check("_trade_markers y=실현+(가격−평단)×보유 (매수점=0)",
+      abs(float(_mk.iloc[0]["값"])) < 1e-9, f"{None if _mk.empty else _mk.iloc[0]['값']}")
+
+_seed = app.prepare_edit_df(None)
+check("prepare_edit_df 빈 입력 시 예시 2행 시드", len(_seed) == 2, f"{len(_seed)}")
+check("prepare_edit_df date=datetime · price=numeric dtype",
+      str(_seed["date"].dtype).startswith("datetime") and "float" in str(_seed["price"].dtype),
+      f"{_seed['date'].dtype}, {_seed['price'].dtype}")
+
 # 3) 앱 부팅 (AppTest) — exception 0
 try:
     from streamlit.testing.v1 import AppTest

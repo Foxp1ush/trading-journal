@@ -146,6 +146,19 @@ check("_trade_markers 매수·매도 2개", len(_mk) == 2 and set(_mk["거래"])
 check("_trade_markers y=실현+(가격−평단)×보유 (매수점=0)",
       abs(float(_mk.iloc[0]["값"])) < 1e-9, f"{None if _mk.empty else _mk.iloc[0]['값']}")
 
+# build_manual_row (빠른 입력 검증)
+_row, _err = app.build_manual_row("2026-06-01", "09:30", "aapl", "BUY", 150.0, 10.0, "USD")
+check("build_manual_row 매매 정상(티커 대문자·수량)",
+      _err == "" and _row and _row["ticker"] == "AAPL" and _row["shares"] == 10.0, f"{_err}")
+_crow, _cerr = app.build_manual_row("2026-06-01", "", "", "DEPOSIT", 1000.0, None, "KRW")
+check("build_manual_row 현금: 티커 무시·shares None",
+      _cerr == "" and _crow and _crow["ticker"] == "" and _crow["shares"] is None, f"{_cerr}")
+_n1, _e1 = app.build_manual_row("2026-06-01", "09:30", "AAPL", "BUY", None, 10.0, "USD")
+_n2, _e2 = app.build_manual_row("2026-06-01", "09:30", "", "BUY", 150.0, 10.0, "USD")
+_n3, _e3 = app.build_manual_row("2026-06-01", "09:30", "AAPL", "BUY", 150.0, None, "USD")
+check("build_manual_row 누락 시 (None, 에러)",
+      _n1 is None and _e1 and _n2 is None and _e2 and _n3 is None and _e3)
+
 _seed = app.prepare_edit_df(None)
 check("prepare_edit_df 빈 입력 시 예시 2행 시드", len(_seed) == 2, f"{len(_seed)}")
 check("prepare_edit_df date=datetime · price=numeric dtype",
@@ -160,6 +173,23 @@ try:
           "; ".join(str(e.value) for e in at.exception))
 except Exception as exc:  # noqa: BLE001
     check("journal_app.py 부팅 exception 0", False, repr(exc))
+
+# 연결 상태 렌더 — 게이트 우회로 탭·빠른입력 폼·전체표가 예외 없이 그려지는지(네트워크 불필요)
+try:
+    from streamlit.testing.v1 import AppTest
+    _cash_only = _pd.DataFrame([
+        {"date": "2026-06-01", "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 1000.0, "shares": None, "currency": "USD"},
+    ])
+    at3 = AppTest.from_file("journal_app.py", default_timeout=60)
+    at3.session_state["ws_ok"] = True
+    at3.session_state["sheet_url"] = "https://example.com/x"
+    at3.session_state["loaded_df"] = _cash_only
+    at3.session_state["draft_df"] = _cash_only.copy()
+    at3.run()
+    check("연결 상태 렌더(탭·빠른입력·전체표) exception 0", len(at3.exception) == 0,
+          "; ".join(str(e.value) for e in at3.exception))
+except Exception as exc:  # noqa: BLE001
+    check("연결 상태 렌더(탭·빠른입력·전체표) exception 0", False, repr(exc))
 
 # 결과
 print()

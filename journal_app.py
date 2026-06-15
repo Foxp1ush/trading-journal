@@ -218,6 +218,34 @@ def df_to_txns(df: pd.DataFrame | None) -> list[dict]:
     return txns
 
 
+def build_manual_row(d, time: str, ticker: str, side: str,
+                     price, shares, ccy: str) -> tuple[dict | None, str]:
+    """빠른 입력 폼 한 건을 검증해 시트 1행(sheets.HEADER 모양) 또는 (None, 에러문구) 반환.
+
+    가격>0 필수. 매매(BUY/SELL)는 티커·수량(>0) 필수. 현금(DEPOSIT/WITHDRAW)은 티커/수량 무시.
+    """
+    side = str(side or "").upper()
+    if price is None or float(price) <= 0:
+        return None, "가격/금액을 입력하세요(0보다 커야 함)."
+    cash = side in jc.CASH_SIDES
+    tk = "" if cash else str(ticker or "").strip().upper()
+    if not cash:
+        if not tk:
+            return None, "매매(BUY/SELL)는 티커가 필요합니다."
+        if shares is None or float(shares) <= 0:
+            return None, "매매(BUY/SELL)는 수량이 필요합니다."
+    row = {
+        "date": pd.Timestamp(d).strftime("%Y-%m-%d"),
+        "time": (str(time).strip() or "09:30") if time else "09:30",
+        "ticker": tk,
+        "side": side,
+        "price": float(price),
+        "shares": (None if cash else float(shares)),
+        "currency": str(ccy or "USD").upper(),
+    }
+    return row, ""
+
+
 def prepare_edit_df(loaded: pd.DataFrame | None) -> pd.DataFrame:
     """시트·CSV·draft의 문자열을 data_editor 컬럼 타입에 맞게 정리(+빈 표는 예시 행 시드)."""
     if loaded is None or len(loaded) == 0:
@@ -239,18 +267,19 @@ def prepare_edit_df(loaded: pd.DataFrame | None) -> pd.DataFrame:
     return edit_df
 
 
-def append_row(ticker: str, ccy: str) -> None:
-    """검색 결과를 작업본(draft_df)에 새 행으로 추가하고 입력 표만 새로고침(fragment)."""
-    new = {"date": str(date.today()), "time": "09:30", "ticker": ticker,
-           "side": "BUY", "price": None, "shares": None, "currency": ccy}
-    df = st.session_state.get("draft_df")
-    if df is None or len(df) == 0:
-        df = pd.DataFrame([new])
-    else:
-        df = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
-    st.session_state["draft_df"] = df
+def _persist_trades(df: pd.DataFrame) -> int:
+    """거래 DataFrame을 시트에 저장하고 세션 상태(loaded_df/draft_df) 동기화. 저장 건수 반환.
+
+    빠른 입력·전체 표 저장이 공통으로 사용한다.
+    """
+    save_df = df.copy()
+    save_df["date"] = pd.to_datetime(save_df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    ws = sheets.connect(st.session_state["sheet_url"])
+    n = sheets.save_trades(ws, save_df)
+    st.session_state["loaded_df"] = sheets.load_trades(ws)
+    st.session_state["draft_df"] = st.session_state["loaded_df"].copy()
     st.session_state["editor_ver"] = st.session_state.get("editor_ver", 0) + 1
-    st.rerun(scope="fragment")
+    return n
 
 
 def _account_metrics(ccy: str, account: dict) -> None:
@@ -373,62 +402,109 @@ def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
 
 # ---------- 매매 기록 입력 (Tab 2 — fragment로 격리) ----------
 
-@st.fragment
-def record_fragment() -> None:
-    """검색·CSV·입력 표를 한 프래그먼트로 격리. 표는 st.form 안 → 저장 때만 시트 반영·전체 갱신."""
+def _quick_add_form() -> None:
+    """맨 위 빠른 입력 — 한 거래씩 입력→즉시 시트 저장(스크롤 불필요)."""
+    # 위젯 키는 인스턴스화 후 수정 불가 → 프리필·초기화는 위젯 생성 전에 처리한다.
+    # 검색에서 고른 종목 프리필
+    if "qa_prefill_ticker" in st.session_state:
+        st.session_state["qa_ticker"] = st.session_state.pop("qa_prefill_ticker")
+        st.session_state["qa_currency"] = st.session_state.pop("qa_prefill_ccy", "USD")
+    # 직전 추가 성공 → 티커·가격·수량만 비움(날짜·구분·통화는 연속 입력 위해 유지)
+    if st.session_state.pop("qa_clear", False):
+        st.session_state["qa_ticker"] = ""
+        st.session_state["qa_price"] = None
+        st.session_state["qa_shares"] = None
 
-    # (a) 종목 검색해서 추가 (국내·미국)
-    with st.expander("🔎 종목 검색해서 추가 (국내·미국)", expanded=False):
-        st.caption("종류를 먼저 고르고 검색하세요. 개별주식·ETF 모두 — 종목명·코드·심볼로 검색.")
-        market = st.radio("종류", ["한국", "미국"], horizontal=True, key="krx_market")
-        ph = "예: 삼성전자, 005930, KODEX 200" if market == "한국" else "예: apple, AAPL, SPY"
-        q = st.text_input("종목명 / 코드 / 심볼", key="krx_q", placeholder=ph)
-        if q.strip():
-            hits = krx.search(q, market={"한국": "KR", "미국": "US"}[market])
-            if hits:
-                labels = [f"{h['name']} ({h['market']}, {h['currency']}) → {h['ticker']}" for h in hits]
-                idx = st.selectbox("후보 선택", range(len(hits)), format_func=lambda i: labels[i], key="krx_pick")
-                if st.button("➕ 이 종목 추가", key="krx_add"):
-                    append_row(hits[idx]["ticker"], hits[idx]["currency"])
-            else:
-                st.caption("검색 결과가 없습니다. 아래 표에 티커를 직접 입력해도 됩니다(국내 005930.KS / 미국 AAPL).")
-
-    # (b) CSV로 한 번에 가져오기
-    with st.expander("📥 CSV로 한 번에 가져오기 (선택)", expanded=False):
-        st.caption(
-            "아래 양식 CSV를 받아 채운 뒤 업로드하세요. 컬럼: date,time,ticker,side,price,shares,currency. "
-            "입금·출금은 ticker 비우고 side=DEPOSIT/WITHDRAW, price=금액, currency=USD/KRW. "
-            "국내 주식은 005930.KS(코스피)/.KQ(코스닥) 코드."
-        )
-        st.download_button("양식 CSV 받기", TEMPLATE_CSV, file_name="trades_template.csv", mime="text/csv")
-        up = st.file_uploader("CSV 업로드", type=["csv"], key="csv_up")
-        if up is not None:
-            try:
-                imported = pd.read_csv(up, dtype=str)
-                missing = [c for c in sheets.HEADER if c not in imported.columns]
-                if missing:
-                    st.error(f"필수 컬럼 누락: {missing} — 양식 CSV를 사용하세요.")
-                else:
-                    imported = imported[sheets.HEADER]
-                    st.dataframe(imported, width="stretch")
-                    if st.button("이 데이터로 채우기", key="csv_apply"):
-                        st.session_state["draft_df"] = imported
-                        st.session_state["editor_ver"] = st.session_state.get("editor_ver", 0) + 1
-                        st.success(f"{len(imported)}행을 표에 채웠습니다. 확인 후 💾 저장하세요.")
-                        st.rerun(scope="fragment")
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"CSV 읽기 실패: {exc}")
-
-    # (c) 거래 입력 표 — st.form 안, 저장(submit) 때만 확정
-    st.subheader("거래 입력")
+    st.subheader("➕ 새 거래 추가")
     st.caption(
-        "매매(BUY/SELL)는 티커·가격·수량을. **입금·출금(DEPOSIT/WITHDRAW)은 티커 비우고 '가격/금액'에 금액만.** "
-        "**통화**: 입금·출금은 직접 고르고, 매매는 티커로 자동(.KS/.KQ면 원화). "
-        "같은 날 단타는 시각으로 순서. **다 고친 뒤 💾 저장**을 눌러야 시트·대시보드에 반영됩니다. "
-        "※ 표를 고치던 중 위의 '검색 추가/CSV'를 누르면 아직 저장 안 한 편집은 사라지니, "
-        "*검색·CSV로 행을 먼저 추가 → 표에서 숫자 채우기 → 저장* 순서를 권장합니다."
+        "한 건씩 입력하고 **추가**를 누르면 바로 저장돼 대시보드에 반영됩니다. "
+        "매매는 티커·가격·수량을, 입금·출금은 구분만 바꾸고 '가격/금액'에 금액만(티커·수량 비움)."
     )
+    with st.form("quick_add"):
+        r1 = st.columns([1.2, 1, 1, 1])
+        d = r1[0].date_input("날짜", value=date.today(), format="YYYY-MM-DD", key="qa_date")
+        t = r1[1].text_input("시각", value="09:30", key="qa_time")
+        side = r1[2].selectbox("구분", ["BUY", "SELL", "DEPOSIT", "WITHDRAW"], key="qa_side")
+        ccy = r1[3].selectbox("통화", ["USD", "KRW"], key="qa_currency")
+        r2 = st.columns([1.6, 1, 1])
+        ticker = r2[0].text_input("티커", key="qa_ticker",
+                                  placeholder="예: AAPL, 005930.KS (입금·출금은 비움)")
+        price = r2[1].number_input("가격/금액", min_value=0.0, value=None, key="qa_price")
+        shares = r2[2].number_input("수량(주)", min_value=0.0, value=None, key="qa_shares")
+        added = st.form_submit_button("➕ 추가 (즉시 저장)", type="primary")
 
+    if added:
+        row, err = build_manual_row(d, t, ticker, side, price, shares, ccy)
+        if err:
+            st.error(err)
+            return
+        base = st.session_state.get("loaded_df")
+        new_df = (pd.DataFrame([row]) if base is None or len(base) == 0
+                  else pd.concat([base, pd.DataFrame([row])], ignore_index=True))
+        try:
+            _persist_trades(new_df)
+            st.session_state["qa_clear"] = True  # 다음 런에서 티커·가격·수량 비움
+            label = row["ticker"] or row["side"]
+            st.toast(f"➕ 추가 완료 — {label}. 대시보드·히스토리에 반영했습니다.", icon="✅")
+            st.rerun()  # 전체 갱신
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"저장 실패: {exc}")
+
+
+def _search_helper() -> None:
+    """종목 검색 → 빠른 입력 폼의 티커·통화 프리필."""
+    st.caption("종류를 고르고 검색해 결과를 선택하면 위 '새 거래 추가'의 티커·통화가 채워집니다.")
+    market = st.radio("종류", ["한국", "미국"], horizontal=True, key="krx_market")
+    ph = "예: 삼성전자, 005930, KODEX 200" if market == "한국" else "예: apple, AAPL, SPY"
+    q = st.text_input("종목명 / 코드 / 심볼", key="krx_q", placeholder=ph)
+    if q.strip():
+        hits = krx.search(q, market={"한국": "KR", "미국": "US"}[market])
+        if hits:
+            labels = [f"{h['name']} ({h['market']}, {h['currency']}) → {h['ticker']}" for h in hits]
+            idx = st.selectbox("후보 선택", range(len(hits)), format_func=lambda i: labels[i], key="krx_pick")
+            if st.button("⬆️ 이 종목 선택 (위 폼에 채우기)", key="krx_pick_btn"):
+                # 위젯 키가 아닌 prefill 키에 담아둔다(폼은 위에서 이미 인스턴스화됨).
+                st.session_state["qa_prefill_ticker"] = hits[idx]["ticker"]
+                st.session_state["qa_prefill_ccy"] = hits[idx]["currency"]
+                st.rerun(scope="fragment")
+        else:
+            st.caption("검색 결과가 없습니다. 위 폼에 티커를 직접 입력해도 됩니다(국내 005930.KS / 미국 AAPL).")
+
+
+def _csv_import() -> None:
+    """CSV 업로드 → 전체 표(draft)에 채움(확정은 전체 표에서 저장)."""
+    st.caption(
+        "양식 CSV를 받아 채운 뒤 업로드하면 아래 '전체 거래' 표에 채워집니다(여러 건 한 번에). "
+        "컬럼: date,time,ticker,side,price,shares,currency. 입금·출금은 ticker 비우고 "
+        "side=DEPOSIT/WITHDRAW, price=금액. 국내 주식은 005930.KS/.KQ 코드."
+    )
+    st.download_button("양식 CSV 받기", TEMPLATE_CSV, file_name="trades_template.csv", mime="text/csv")
+    up = st.file_uploader("CSV 업로드", type=["csv"], key="csv_up")
+    if up is None:
+        return
+    try:
+        imported = pd.read_csv(up, dtype=str)
+        missing = [c for c in sheets.HEADER if c not in imported.columns]
+        if missing:
+            st.error(f"필수 컬럼 누락: {missing} — 양식 CSV를 사용하세요.")
+            return
+        imported = imported[sheets.HEADER]
+        st.dataframe(imported, width="stretch")
+        if st.button("이 데이터로 표 채우기", key="csv_apply"):
+            st.session_state["draft_df"] = imported
+            st.session_state["editor_ver"] = st.session_state.get("editor_ver", 0) + 1
+            st.success(f"{len(imported)}행을 아래 표에 채웠습니다. 펼쳐 확인 후 💾 저장하세요.")
+            st.rerun(scope="fragment")
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"CSV 읽기 실패: {exc}")
+
+
+def _full_table_editor() -> None:
+    """전체 거래 수정·삭제(벌크) — 표 편집 후 💾 저장. 평소엔 접혀 있어 스크롤 부담 없음."""
+    st.caption(
+        "기존 거래 **수정·삭제**나 CSV로 채운 여러 건 확정용입니다. 고친 뒤 **💾 저장**을 눌러야 반영됩니다. "
+        "※ 표를 고치던 중 위 '새 거래 추가'를 저장하면 표의 미저장 편집은 사라질 수 있어요."
+    )
     edit_df = prepare_edit_df(st.session_state.get("draft_df"))
     editor_key = f"editor_{st.session_state.get('editor_ver', 0)}"
     with st.form("transaction_form"):
@@ -451,17 +527,28 @@ def record_fragment() -> None:
 
     if submitted:
         try:
-            save_df = edited.copy()
-            save_df["date"] = pd.to_datetime(save_df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-            ws = sheets.connect(st.session_state["sheet_url"])
-            n = sheets.save_trades(ws, save_df)
-            st.session_state["loaded_df"] = sheets.load_trades(ws)
-            st.session_state["draft_df"] = st.session_state["loaded_df"].copy()
-            st.session_state["editor_ver"] = st.session_state.get("editor_ver", 0) + 1
+            n = _persist_trades(edited)
             st.toast(f"💾 저장 완료 — {n}건 기록. 대시보드·히스토리에 반영했습니다.", icon="✅")
-            st.rerun()  # 기본 scope="app" → 대시보드/히스토리까지 전체 갱신
+            st.rerun()  # 전체 갱신
         except Exception as exc:  # noqa: BLE001
             st.error(f"저장 실패: {exc}")
+
+
+@st.fragment
+def record_fragment() -> None:
+    """매매 기록 탭 — 빠른 입력(즉시 저장) 위주, 전체 표는 접이식 수정용. fragment로 격리."""
+    _quick_add_form()
+
+    with st.expander("🔎 종목 검색 (티커 채우기)", expanded=False):
+        _search_helper()
+
+    with st.expander("📥 CSV로 여러 건 가져오기", expanded=False):
+        _csv_import()
+
+    draft = st.session_state.get("draft_df")
+    n_rows = 0 if draft is None else len(draft)
+    with st.expander(f"📋 전체 거래 수정·삭제 ({n_rows}건)", expanded=False):
+        _full_table_editor()
 
 
 # ---------- 시트 연결 (탭 밖, 공통 게이트) ----------

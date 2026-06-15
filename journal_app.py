@@ -303,10 +303,12 @@ with st.expander("📥 CSV로 한 번에 가져오기 (선택)", expanded=False)
 # ---------- 종목 검색해서 추가 (국내·미국) ----------
 
 with st.expander("🔎 종목 검색해서 추가 (국내·미국)", expanded=False):
-    st.caption("개별주식·ETF(국내·미국) 모두. 종목명(삼성전자·apple)·코드(005930)·심볼(AAPL·SPY·KODEX)로 검색하세요.")
-    q = st.text_input("종목명 / 코드 / 심볼", key="krx_q", placeholder="예: 삼성전자, 005930, apple, AAPL")
+    st.caption("종류를 먼저 고르고 검색하세요. 개별주식·ETF 모두 — 종목명·코드·심볼로 검색.")
+    market = st.radio("종류", ["한국", "미국"], horizontal=True, key="krx_market")
+    ph = "예: 삼성전자, 005930, KODEX 200" if market == "한국" else "예: apple, AAPL, SPY"
+    q = st.text_input("종목명 / 코드 / 심볼", key="krx_q", placeholder=ph)
     if q.strip():
-        hits = krx.search(q)
+        hits = krx.search(q, market={"한국": "KR", "미국": "US"}[market])
         if hits:
             labels = [f"{h['name']} ({h['market']}, {h['currency']}) → {h['ticker']}" for h in hits]
             idx = st.selectbox("후보 선택", range(len(hits)), format_func=lambda i: labels[i], key="krx_pick")

@@ -134,14 +134,18 @@ def _search_us(q: str, limit: int) -> list[dict]:
     ]
 
 
-def search(query: str, limit: int = 12) -> list[dict]:
-    """국내·미국 통합 검색. 반환: [{ticker, name, market, currency}, ...].
+def search(query: str, limit: int = 12, market: str | None = None) -> list[dict]:
+    """종목 검색. market="KR"→국내만, "US"→미국만, None→둘 다.
 
-    6자리 숫자 → 국내 코드. 그 외엔 국내 종목명 + 미국 심볼/이름 모두 검색.
+    6자리 숫자 → 국내 코드(미국 선택 시엔 결과 없음). 그 외엔 이름/심볼 부분일치.
     """
     q = str(query).strip()
     if not q:
         return []
+    if market == "KR":
+        return _search_kr(q, limit)
+    if market == "US":
+        return [] if _CODE_RE.match(q) else _search_us(q, limit)
     if _CODE_RE.match(q):
         return _search_kr(q, limit)
     per = max(3, limit // 2)

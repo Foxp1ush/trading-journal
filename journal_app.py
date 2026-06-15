@@ -4,6 +4,13 @@
 저장: 각 사용자 본인 구글시트(서비스 계정에 공유). 비공개·영속성은 본인 구글 계정이 책임.
 
 로컬 실행: streamlit run journal_app.py   (.streamlit/secrets.toml 필요)
+
+구조(Phase 1): 메인을 3개 탭으로 분리.
+- 📊 대시보드 : 저장된 거래(loaded_df)만 읽어 계좌가치·자산배분·누적손익 렌더.
+- ✍️ 매매 기록 : @st.fragment로 격리된 입력 영역(검색·CSV·입력 표). 표는 st.form 안 →
+                💾 저장(submit) 때만 시트 저장 + 전체 앱 갱신. 입력 중 다른 탭은 재계산 안 됨.
+- 📜 히스토리 : 시트에서 불러온 전체 확정 거래 표.
+편집 중 작업본은 draft_df, 저장 확정본은 loaded_df로 분리해 깜빡임(전체 리렌더)을 끊는다.
 """
 
 from __future__ import annotations
@@ -24,6 +31,20 @@ st.title("📒 주식 매매일지")
 st.caption(
     "실제 체결가를 직접 입력 → 종목별 평균단가·실현손익 + 입출금까지 기록하면 실제 계좌가치·자산배분까지. "
     "보유분은 일별 종가로 평가(하이브리드). 수수료·세금 미반영, 투자 자문 아님."
+)
+
+
+# ---------- 입력 스키마/상수 ----------
+
+CASH_SIDES = {"DEPOSIT", "WITHDRAW"}
+SCHEMA_COLS = ["date", "time", "ticker", "side", "price", "shares", "currency"]
+TEMPLATE_CSV = (
+    "date,time,ticker,side,price,shares,currency\n"
+    "2026-06-01,09:00,,DEPOSIT,1000,,USD\n"
+    "2026-06-01,09:30,AAPL,BUY,150,10,USD\n"
+    "2026-06-02,14:00,AAPL,SELL,160,4,USD\n"
+    "2026-06-03,09:05,,DEPOSIT,1000000,,KRW\n"
+    "2026-06-03,09:30,005930.KS,BUY,70000,10,KRW\n"
 )
 
 
@@ -114,18 +135,69 @@ def fmt_money(x: float, ccy: str) -> str:
     return f"{x:,.2f} {ccy}"
 
 
+# ---------- 데이터 변환 헬퍼 ----------
+
+def df_to_txns(df: pd.DataFrame | None) -> list[dict]:
+    """거래 표(DataFrame) → Txn 리스트. 현금(DEPOSIT/WITHDRAW)/매매 분기, 빈값 스킵."""
+    txns: list[dict] = []
+    if df is None or len(df) == 0:
+        return txns
+    for _, row in df.iterrows():
+        d = row.get("date")
+        price = row.get("price")
+        if pd.isna(d) or pd.isna(price):
+            continue
+        side = str(row.get("side") or "BUY").upper()
+        tk = str(row.get("ticker") or "").strip().upper()
+        ccy = str(row.get("currency") or "USD").strip().upper() or "USD"
+        base = {
+            "date": pd.Timestamp(d).strftime("%Y-%m-%d"),
+            "time": str(row.get("time") or "09:30"),
+        }
+        if side in CASH_SIDES:
+            txns.append({**base, "ticker": "", "side": side,
+                         "price": float(price), "shares": 0.0, "currency": ccy})
+        else:  # BUY / SELL — 티커·수량 필요 (통화는 티커로 자동 판정)
+            if not tk or pd.isna(row.get("shares")):
+                continue
+            txns.append({**base, "ticker": tk, "side": side,
+                         "price": float(price), "shares": float(row["shares"]), "currency": ccy})
+    return txns
+
+
+def prepare_edit_df(loaded: pd.DataFrame | None) -> pd.DataFrame:
+    """시트·CSV·draft의 문자열을 data_editor 컬럼 타입에 맞게 정리(+빈 표는 예시 행 시드)."""
+    if loaded is None or len(loaded) == 0:
+        today = date.today()
+        loaded = pd.DataFrame([
+            {"date": str(today), "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 1000.0, "shares": None, "currency": "USD"},
+            {"date": str(today), "time": "09:30", "ticker": "AAPL", "side": "BUY", "price": 150.0, "shares": 10.0, "currency": "USD"},
+        ])
+    edit_df = loaded.copy()
+    if "currency" not in edit_df.columns:
+        edit_df["currency"] = "USD"
+    for c in ("ticker", "side", "time", "currency"):
+        if c in edit_df.columns:
+            edit_df[c] = edit_df[c].astype(str).replace({"nan": "", "None": ""})
+    edit_df["currency"] = edit_df["currency"].replace({"": "USD"}).str.upper()
+    edit_df["date"] = pd.to_datetime(edit_df["date"], errors="coerce")
+    edit_df["price"] = pd.to_numeric(edit_df["price"], errors="coerce")
+    edit_df["shares"] = pd.to_numeric(edit_df["shares"], errors="coerce")
+    return edit_df
+
+
 def append_row(ticker: str, ccy: str) -> None:
-    """검색 결과를 거래 표(loaded_df)에 새 행으로 추가하고 에디터를 새로고침."""
+    """검색 결과를 작업본(draft_df)에 새 행으로 추가하고 입력 표만 새로고침(fragment)."""
     new = {"date": str(date.today()), "time": "09:30", "ticker": ticker,
            "side": "BUY", "price": None, "shares": None, "currency": ccy}
-    df = st.session_state.get("loaded_df")
+    df = st.session_state.get("draft_df")
     if df is None or len(df) == 0:
         df = pd.DataFrame([new])
     else:
         df = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
-    st.session_state["loaded_df"] = df
+    st.session_state["draft_df"] = df
     st.session_state["editor_ver"] = st.session_state.get("editor_ver", 0) + 1
-    st.rerun()
+    st.rerun(scope="fragment")
 
 
 def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
@@ -225,7 +297,100 @@ def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
         st.dataframe(audit, width="stretch")
 
 
-# ---------- 시트 연결 ----------
+# ---------- 매매 기록 입력 (Tab 2 — fragment로 격리) ----------
+
+@st.fragment
+def record_fragment() -> None:
+    """검색·CSV·입력 표를 한 프래그먼트로 격리. 표는 st.form 안 → 저장 때만 시트 반영·전체 갱신."""
+
+    # (a) 종목 검색해서 추가 (국내·미국)
+    with st.expander("🔎 종목 검색해서 추가 (국내·미국)", expanded=False):
+        st.caption("종류를 먼저 고르고 검색하세요. 개별주식·ETF 모두 — 종목명·코드·심볼로 검색.")
+        market = st.radio("종류", ["한국", "미국"], horizontal=True, key="krx_market")
+        ph = "예: 삼성전자, 005930, KODEX 200" if market == "한국" else "예: apple, AAPL, SPY"
+        q = st.text_input("종목명 / 코드 / 심볼", key="krx_q", placeholder=ph)
+        if q.strip():
+            hits = krx.search(q, market={"한국": "KR", "미국": "US"}[market])
+            if hits:
+                labels = [f"{h['name']} ({h['market']}, {h['currency']}) → {h['ticker']}" for h in hits]
+                idx = st.selectbox("후보 선택", range(len(hits)), format_func=lambda i: labels[i], key="krx_pick")
+                if st.button("➕ 이 종목 추가", key="krx_add"):
+                    append_row(hits[idx]["ticker"], hits[idx]["currency"])
+            else:
+                st.caption("검색 결과가 없습니다. 아래 표에 티커를 직접 입력해도 됩니다(국내 005930.KS / 미국 AAPL).")
+
+    # (b) CSV로 한 번에 가져오기
+    with st.expander("📥 CSV로 한 번에 가져오기 (선택)", expanded=False):
+        st.caption(
+            "아래 양식 CSV를 받아 채운 뒤 업로드하세요. 컬럼: date,time,ticker,side,price,shares,currency. "
+            "입금·출금은 ticker 비우고 side=DEPOSIT/WITHDRAW, price=금액, currency=USD/KRW. "
+            "국내 주식은 005930.KS(코스피)/.KQ(코스닥) 코드."
+        )
+        st.download_button("양식 CSV 받기", TEMPLATE_CSV, file_name="trades_template.csv", mime="text/csv")
+        up = st.file_uploader("CSV 업로드", type=["csv"], key="csv_up")
+        if up is not None:
+            try:
+                imported = pd.read_csv(up, dtype=str)
+                missing = [c for c in SCHEMA_COLS if c not in imported.columns]
+                if missing:
+                    st.error(f"필수 컬럼 누락: {missing} — 양식 CSV를 사용하세요.")
+                else:
+                    imported = imported[SCHEMA_COLS]
+                    st.dataframe(imported, width="stretch")
+                    if st.button("이 데이터로 채우기", key="csv_apply"):
+                        st.session_state["draft_df"] = imported
+                        st.session_state["editor_ver"] = st.session_state.get("editor_ver", 0) + 1
+                        st.success(f"{len(imported)}행을 표에 채웠습니다. 확인 후 💾 저장하세요.")
+                        st.rerun(scope="fragment")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"CSV 읽기 실패: {exc}")
+
+    # (c) 거래 입력 표 — st.form 안, 저장(submit) 때만 확정
+    st.subheader("거래 입력")
+    st.caption(
+        "매매(BUY/SELL)는 티커·가격·수량을. **입금·출금(DEPOSIT/WITHDRAW)은 티커 비우고 '가격/금액'에 금액만.** "
+        "**통화**: 입금·출금은 직접 고르고, 매매는 티커로 자동(.KS/.KQ면 원화). "
+        "같은 날 단타는 시각으로 순서. **다 고친 뒤 💾 저장**을 눌러야 시트·대시보드에 반영됩니다. "
+        "※ 표를 고치던 중 위의 '검색 추가/CSV'를 누르면 아직 저장 안 한 편집은 사라지니, "
+        "*검색·CSV로 행을 먼저 추가 → 표에서 숫자 채우기 → 저장* 순서를 권장합니다."
+    )
+
+    edit_df = prepare_edit_df(st.session_state.get("draft_df"))
+    editor_key = f"editor_{st.session_state.get('editor_ver', 0)}"
+    with st.form("transaction_form"):
+        edited = st.data_editor(
+            edit_df, num_rows="dynamic", width="stretch", key=editor_key,
+            column_config={
+                "date": st.column_config.DateColumn("날짜", format="YYYY-MM-DD", required=True),
+                "time": st.column_config.TextColumn("시각", help="HH:MM (24시간)", default="09:30"),
+                "ticker": st.column_config.TextColumn("티커", help="입금·출금은 비워두세요. 국내는 005930.KS"),
+                "side": st.column_config.SelectboxColumn(
+                    "구분", options=["BUY", "SELL", "DEPOSIT", "WITHDRAW"], required=True, default="BUY"),
+                "price": st.column_config.NumberColumn(
+                    "가격/금액", help="매매는 체결가, 입금·출금은 금액", min_value=0.0, required=True),
+                "shares": st.column_config.NumberColumn("수량(주)", help="입금·출금은 비워두세요", min_value=0.0, format="%g"),
+                "currency": st.column_config.SelectboxColumn(
+                    "통화", options=["USD", "KRW"], help="입금·출금 통화(매매는 티커로 자동)", default="USD"),
+            },
+        )
+        submitted = st.form_submit_button("💾 저장", type="primary")
+
+    if submitted:
+        try:
+            save_df = edited.copy()
+            save_df["date"] = pd.to_datetime(save_df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            ws = sheets.connect(st.session_state["sheet_url"])
+            n = sheets.save_trades(ws, save_df)
+            st.session_state["loaded_df"] = sheets.load_trades(ws)
+            st.session_state["draft_df"] = st.session_state["loaded_df"].copy()
+            st.session_state["editor_ver"] = st.session_state.get("editor_ver", 0) + 1
+            st.toast(f"💾 저장 완료 — {n}건 기록. 대시보드·히스토리에 반영했습니다.", icon="✅")
+            st.rerun()  # 기본 scope="app" → 대시보드/히스토리까지 전체 갱신
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"저장 실패: {exc}")
+
+
+# ---------- 시트 연결 (탭 밖, 공통 게이트) ----------
 
 with st.expander("① 처음이라면 — 구글시트 연결 방법", expanded=False):
     st.markdown(
@@ -252,6 +417,8 @@ if col_btn.button("연결", type="primary", use_container_width=True):
         st.session_state["sheet_url"] = sheet_url
         st.session_state["ws_ok"] = True
         st.session_state["loaded_df"] = sheets.load_trades(ws)
+        st.session_state["draft_df"] = st.session_state["loaded_df"].copy()
+        st.session_state["editor_ver"] = st.session_state.get("editor_ver", 0) + 1
         st.success("연결됨 — 시트의 거래를 불러왔습니다.")
     except Exception as exc:  # noqa: BLE001
         st.session_state["ws_ok"] = False
@@ -261,157 +428,41 @@ if not st.session_state.get("ws_ok"):
     st.info("구글시트를 연결하면 매매 입력·저장이 활성화됩니다.")
     st.stop()
 
-
-# ---------- CSV 가져오기 ----------
-
-SCHEMA_COLS = ["date", "time", "ticker", "side", "price", "shares", "currency"]
-TEMPLATE_CSV = (
-    "date,time,ticker,side,price,shares,currency\n"
-    "2026-06-01,09:00,,DEPOSIT,1000,,USD\n"
-    "2026-06-01,09:30,AAPL,BUY,150,10,USD\n"
-    "2026-06-02,14:00,AAPL,SELL,160,4,USD\n"
-    "2026-06-03,09:05,,DEPOSIT,1000000,,KRW\n"
-    "2026-06-03,09:30,005930.KS,BUY,70000,10,KRW\n"
-)
-
-with st.expander("📥 CSV로 한 번에 가져오기 (선택)", expanded=False):
-    st.caption(
-        "아래 양식 CSV를 받아 채운 뒤 업로드하세요. 컬럼: date,time,ticker,side,price,shares,currency. "
-        "입금·출금은 ticker 비우고 side=DEPOSIT/WITHDRAW, price=금액, currency=USD/KRW. "
-        "국내 주식은 005930.KS(코스피)/.KQ(코스닥) 코드."
-    )
-    st.download_button("양식 CSV 받기", TEMPLATE_CSV, file_name="trades_template.csv", mime="text/csv")
-    up = st.file_uploader("CSV 업로드", type=["csv"], key="csv_up")
-    if up is not None:
-        try:
-            imported = pd.read_csv(up, dtype=str)
-            missing = [c for c in SCHEMA_COLS if c not in imported.columns]
-            if missing:
-                st.error(f"필수 컬럼 누락: {missing} — 양식 CSV를 사용하세요.")
-            else:
-                imported = imported[SCHEMA_COLS]
-                st.dataframe(imported, width="stretch")
-                if st.button("이 데이터로 채우기", key="csv_apply"):
-                    st.session_state["loaded_df"] = imported
-                    st.session_state["editor_ver"] = st.session_state.get("editor_ver", 0) + 1
-                    st.success(f"{len(imported)}행을 불러왔습니다. 아래 표에서 확인 후 💾 저장하세요.")
-                    st.rerun()
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"CSV 읽기 실패: {exc}")
+# 작업본(draft_df) 보정 — 연결됐는데 누락된 경우(세션 재개 등)
+if "draft_df" not in st.session_state:
+    base = st.session_state.get("loaded_df")
+    st.session_state["draft_df"] = base.copy() if base is not None else pd.DataFrame(columns=sheets.HEADER)
 
 
-# ---------- 종목 검색해서 추가 (국내·미국) ----------
+# ---------- 메인: 3개 탭 ----------
 
-with st.expander("🔎 종목 검색해서 추가 (국내·미국)", expanded=False):
-    st.caption("종류를 먼저 고르고 검색하세요. 개별주식·ETF 모두 — 종목명·코드·심볼로 검색.")
-    market = st.radio("종류", ["한국", "미국"], horizontal=True, key="krx_market")
-    ph = "예: 삼성전자, 005930, KODEX 200" if market == "한국" else "예: apple, AAPL, SPY"
-    q = st.text_input("종목명 / 코드 / 심볼", key="krx_q", placeholder=ph)
-    if q.strip():
-        hits = krx.search(q, market={"한국": "KR", "미국": "US"}[market])
-        if hits:
-            labels = [f"{h['name']} ({h['market']}, {h['currency']}) → {h['ticker']}" for h in hits]
-            idx = st.selectbox("후보 선택", range(len(hits)), format_func=lambda i: labels[i], key="krx_pick")
-            if st.button("➕ 이 종목 추가", key="krx_add"):
-                append_row(hits[idx]["ticker"], hits[idx]["currency"])
-        else:
-            st.caption("검색 결과가 없습니다. 아래 표에 티커를 직접 입력해도 됩니다(국내 005930.KS / 미국 AAPL).")
+tab_dash, tab_record, tab_hist = st.tabs(["📊 대시보드", "✍️ 매매 기록", "📜 히스토리"])
 
+with tab_dash:
+    txns = df_to_txns(st.session_state.get("loaded_df"))
+    if not txns:
+        st.info("아직 저장된 거래가 없습니다. **✍️ 매매 기록** 탭에서 입력하고 💾 저장하세요.")
+    else:
+        by_ccy = jc.split_by_currency(txns)
+        # USD 먼저, 그다음 KRW, 나머지는 알파벳 순
+        order = ([c for c in ("USD", "KRW") if c in by_ccy]
+                 + sorted(c for c in by_ccy if c not in ("USD", "KRW")))
+        for i, ccy in enumerate(order):
+            if i > 0:
+                st.divider()
+            render_currency_section(ccy, by_ccy[ccy])
 
-# ---------- 거래 입력 표 ----------
+with tab_record:
+    record_fragment()
 
-st.subheader("거래 입력")
-st.caption(
-    "매매(BUY/SELL)는 티커·가격·수량을. **입금·출금(DEPOSIT/WITHDRAW)은 티커 비우고 '가격/금액'에 금액만.** "
-    "**통화**: 입금·출금은 직접 고르고, 매매는 티커로 자동(.KS/.KQ면 원화). "
-    "**국내 주식은 005930.KS(코스피)/.KQ(코스닥) 코드.** 같은 날 단타는 시각으로 순서. 다 고친 뒤 **저장**."
-)
-
-loaded = st.session_state.get("loaded_df")
-if loaded is None or loaded.empty:
-    today = date.today()
-    loaded = pd.DataFrame([
-        {"date": str(today), "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 1000.0, "shares": None, "currency": "USD"},
-        {"date": str(today), "time": "09:30", "ticker": "AAPL", "side": "BUY", "price": 150.0, "shares": 10.0, "currency": "USD"},
-    ])
-
-# 시트·CSV의 문자열을 에디터 컬럼 타입에 맞게 정리
-edit_df = loaded.copy()
-if "currency" not in edit_df.columns:
-    edit_df["currency"] = "USD"
-for c in ("ticker", "side", "time", "currency"):
-    if c in edit_df.columns:
-        edit_df[c] = edit_df[c].astype(str).replace({"nan": "", "None": ""})
-edit_df["currency"] = edit_df["currency"].replace({"": "USD"}).str.upper()
-edit_df["date"] = pd.to_datetime(edit_df["date"], errors="coerce")
-edit_df["price"] = pd.to_numeric(edit_df["price"], errors="coerce")
-edit_df["shares"] = pd.to_numeric(edit_df["shares"], errors="coerce")
-
-editor_key = f"editor_{st.session_state.get('editor_ver', 0)}"
-edited = st.data_editor(
-    edit_df, num_rows="dynamic", width="stretch", key=editor_key,
-    column_config={
-        "date": st.column_config.DateColumn("날짜", format="YYYY-MM-DD", required=True),
-        "time": st.column_config.TextColumn("시각", help="HH:MM (24시간)", default="09:30"),
-        "ticker": st.column_config.TextColumn("티커", help="입금·출금은 비워두세요. 국내는 005930.KS"),
-        "side": st.column_config.SelectboxColumn(
-            "구분", options=["BUY", "SELL", "DEPOSIT", "WITHDRAW"], required=True, default="BUY"),
-        "price": st.column_config.NumberColumn(
-            "가격/금액", help="매매는 체결가, 입금·출금은 금액", min_value=0.0, required=True),
-        "shares": st.column_config.NumberColumn("수량(주)", help="입금·출금은 비워두세요", min_value=0.0, format="%g"),
-        "currency": st.column_config.SelectboxColumn(
-            "통화", options=["USD", "KRW"], help="입금·출금 통화(매매는 티커로 자동)", default="USD"),
-    },
-)
-
-if st.button("💾 저장", type="primary"):
-    try:
-        save_df = edited.copy()
-        save_df["date"] = pd.to_datetime(save_df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        ws = sheets.connect(st.session_state["sheet_url"])
-        n = sheets.save_trades(ws, save_df)
-        st.session_state["loaded_df"] = sheets.load_trades(ws)
-        st.success(f"저장 완료 — {n}건 기록.")
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"저장 실패: {exc}")
-
-
-# ---------- 거래 → Txn 변환 (매매 + 현금) ----------
-
-CASH_SIDES = {"DEPOSIT", "WITHDRAW"}
-txns: list[dict] = []
-for _, row in edited.iterrows():
-    d = row.get("date")
-    price = row.get("price")
-    if pd.isna(d) or pd.isna(price):
-        continue
-    side = str(row.get("side") or "BUY").upper()
-    tk = str(row.get("ticker") or "").strip().upper()
-    ccy = str(row.get("currency") or "USD").strip().upper() or "USD"
-    base = {
-        "date": pd.Timestamp(d).strftime("%Y-%m-%d"),
-        "time": str(row.get("time") or "09:30"),
-    }
-    if side in CASH_SIDES:
-        txns.append({**base, "ticker": "", "side": side,
-                     "price": float(price), "shares": 0.0, "currency": ccy})
-    else:  # BUY / SELL — 티커·수량 필요 (통화는 티커로 자동 판정)
-        if not tk or pd.isna(row.get("shares")):
-            continue
-        txns.append({**base, "ticker": tk, "side": side,
-                     "price": float(price), "shares": float(row["shares"]), "currency": ccy})
-
-if not txns:
-    st.info("거래를 한 건 이상 입력하세요.")
-    st.stop()
-
-
-# ---------- 통화별 섹션 ----------
-
-by_ccy = jc.split_by_currency(txns)
-# USD 먼저, 그다음 KRW, 나머지는 알파벳 순
-order = [c for c in ("USD", "KRW") if c in by_ccy] + sorted(c for c in by_ccy if c not in ("USD", "KRW"))
-for i, ccy in enumerate(order):
-    if i > 0:
-        st.divider()
-    render_currency_section(ccy, by_ccy[ccy])
+with tab_hist:
+    hist = st.session_state.get("loaded_df")
+    if hist is None or len(hist) == 0:
+        st.info("저장된 거래가 없습니다. **✍️ 매매 기록** 탭에서 입력하고 💾 저장하세요.")
+    else:
+        st.caption(f"시트에 저장된 전체 확정 거래 {len(hist)}건.")
+        st.dataframe(hist, width="stretch", hide_index=True)
+        st.download_button(
+            "CSV로 내보내기", hist.to_csv(index=False).encode("utf-8-sig"),
+            file_name="trades_export.csv", mime="text/csv",
+        )

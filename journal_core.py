@@ -22,12 +22,15 @@ DEPOSIT = "DEPOSIT"    # 현금 입금 (ticker 없음, price=금액)
 WITHDRAW = "WITHDRAW"  # 현금 출금 (ticker 없음, price=금액)
 CASH_SIDES = (DEPOSIT, WITHDRAW)
 
+USD = "USD"
+KRW = "KRW"
+
 
 class Txn(TypedDict):
     """거래 한 건. side는 'BUY'|'SELL'|'DEPOSIT'|'WITHDRAW'.
 
-    매매(BUY/SELL): ticker·price·shares 모두 양수.
-    현금(DEPOSIT/WITHDRAW): ticker 빈 문자열, price=금액, shares 무시.
+    매매(BUY/SELL): ticker·price·shares 모두 양수. 통화는 티커로 자동 판정.
+    현금(DEPOSIT/WITHDRAW): ticker 빈 문자열, price=금액, shares 무시. 통화는 'currency' 명시.
     """
     date: str    # 'YYYY-MM-DD'
     time: str    # 'HH:MM'
@@ -35,6 +38,31 @@ class Txn(TypedDict):
     side: str
     price: float
     shares: float
+    currency: str  # 'USD'|'KRW' — 현금 거래에서 사용(매매는 티커로 자동)
+
+
+# ---------- 통화 ----------
+
+def currency_of_ticker(ticker: str) -> str:
+    """티커 접미사로 통화 판정. .KS(코스피)/.KQ(코스닥) → KRW, 그 외 → USD."""
+    t = str(ticker).strip().upper()
+    return KRW if (t.endswith(".KS") or t.endswith(".KQ")) else USD
+
+
+def txn_currency(txn: Txn) -> str:
+    """거래의 통화. 현금이면 명시 통화(currency), 매매면 티커로 판정."""
+    side = str(txn.get("side", "")).upper()
+    if side in CASH_SIDES:
+        return str(txn.get("currency") or USD).upper()
+    return currency_of_ticker(txn.get("ticker", ""))
+
+
+def split_by_currency(txns: list[Txn]) -> dict[str, list[Txn]]:
+    """거래를 통화별로 분리. 각 묶음은 단일통화라 기존 함수로 그대로 처리 가능."""
+    out: dict[str, list[Txn]] = {}
+    for t in txns:
+        out.setdefault(txn_currency(t), []).append(t)
+    return out
 
 
 @dataclass

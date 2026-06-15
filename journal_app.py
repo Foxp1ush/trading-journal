@@ -101,6 +101,113 @@ def _pie_chart(allocation: dict[str, float]) -> alt.Chart:
     )
 
 
+CCY_LABEL = {"USD": "💵 달러 계좌 (USD)", "KRW": "🇰🇷 원화 계좌 (KRW)"}
+
+
+def fmt_money(x: float, ccy: str) -> str:
+    """통화 기호·자릿수에 맞춘 금액 표기. USD 2자리, KRW 정수."""
+    if ccy == "KRW":
+        return f"₩{x:,.0f}"
+    if ccy == "USD":
+        return f"${x:,.2f}"
+    return f"{x:,.2f} {ccy}"
+
+
+def render_currency_section(ccy: str, ccy_txns: list[dict]) -> None:
+    """한 통화(USD 또는 KRW)의 계좌·손익 섹션을 통째로 렌더. 단일통화라 기존 함수 그대로 사용."""
+    st.header(CCY_LABEL.get(ccy, f"{ccy} 계좌"))
+
+    results = jc.process_portfolio(ccy_txns)
+    price_frames = {tk: prices.get_prices(tk) for tk in results}
+    last_closes = {tk: prices.latest_close(price_frames[tk]) for tk in results}
+    account = jc.current_account(ccy_txns, last_closes)
+
+    missing = [tk for tk in results if last_closes[tk] is None]
+    if missing:
+        st.warning(f"시세를 못 받은 종목(평가 0 처리): {', '.join(missing)}")
+
+    # 계좌 요약
+    a = st.columns(3)
+    a[0].metric("계좌가치", fmt_money(account["account_value"], ccy), help="현금 + 보유 시가평가")
+    a[1].metric("현금잔고", fmt_money(account["cash"], ccy), help="입금·매도 − 출금·매수")
+    a[2].metric("보유 시가", fmt_money(account["holdings_value"], ccy))
+
+    col_pie, col_curve = st.columns([1, 2])
+    with col_pie:
+        st.caption("자산배분")
+        if account["allocation"]:
+            st.altair_chart(_pie_chart(account["allocation"]), width="stretch")
+        else:
+            st.info("보유 종목·현금이 없습니다.")
+
+    acct_curve = jc.account_value_curve(ccy_txns, price_frames)
+    with col_curve:
+        st.caption("계좌가치 추이")
+        if acct_curve.empty:
+            st.info("표시할 계좌가치 데이터가 없습니다.")
+        else:
+            dmin, dmax = acct_curve.index.min().date(), acct_curve.index.max().date()
+            c1, c2 = st.columns(2)
+            start = c1.date_input("시작", value=dmin, min_value=dmin, max_value=dmax, key=f"avs_{ccy}")
+            end = c2.date_input("끝", value=dmax, min_value=dmin, max_value=dmax, key=f"ave_{ccy}")
+            win = acct_curve.loc[str(start):str(end)]
+            if win.empty:
+                win = acct_curve
+            st.altair_chart(_line_chart(win, "계좌가치"), width="stretch")
+            change = float(win["계좌가치"].iloc[-1] - win["계좌가치"].iloc[0])
+            st.metric("선택 기간 계좌가치 변화", fmt_money(change, ccy))
+
+    if not results:
+        st.info("이 통화의 매매 기록이 없습니다(현금 거래만).")
+        return
+
+    # 매매 손익
+    st.subheader("매매 손익 — 종목별")
+    summary = jc.portfolio_summary(results, last_closes)
+    m = st.columns(4)
+    m[0].metric("실현손익 합계", fmt_money(summary["실현손익"].sum(), ccy))
+    m[1].metric("미실현손익 합계", fmt_money(summary["미실현손익"].sum(), ccy))
+    m[2].metric("총손익 합계", fmt_money(summary["총손익"].sum(), ccy))
+    tot_cost = summary["매수금액"].sum()
+    tot_ret = (summary["총손익"].sum() / tot_cost * 100.0) if tot_cost > 0 else 0.0
+    m[3].metric("수익률", f"{tot_ret:+.2f}%", help="총손익 합계 / 누적 매수금액")
+
+    money = "{:,.0f}" if ccy == "KRW" else "{:,.2f}"
+    signed = "{:+,.0f}" if ccy == "KRW" else "{:+,.2f}"
+    st.dataframe(
+        summary.style.format({
+            "보유수량": "{:g}", "평균단가": money, "실현손익": signed,
+            "미실현손익": signed, "총손익": signed, "매수금액": money, "수익률%": "{:+.2f}",
+        }),
+        width="stretch",
+    )
+
+    curve = jc.portfolio_pnl_curve(results, price_frames)
+    if not curve.empty:
+        st.altair_chart(_line_with_zero(curve, f"누적손익 ({ccy})"), width="stretch")
+
+    pick = st.selectbox("종목 선택", options=list(results), key=f"pick_{ccy}")
+    res = results[pick]
+    detail = jc.build_pnl_curve(res.rows, price_frames.get(pick))
+    if not detail.empty:
+        st.altair_chart(
+            _line_with_zero(detail.rename(columns={"누적손익": pick}), f"누적손익 ({ccy})"),
+            width="stretch",
+        )
+    for w in res.warnings:
+        st.warning(w)
+    with st.expander("거래 처리 내역 (평단·실현손익 추적)"):
+        audit = pd.DataFrame([
+            {
+                "시각": r.ts, "구분": r.side, "가격": r.price, "체결수량": r.shares,
+                "보유수량": r.position_shares, "평균단가": r.avg_cost,
+                "누적실현손익": r.realized_pnl, "비고": r.note,
+            }
+            for r in res.rows
+        ])
+        st.dataframe(audit, width="stretch")
+
+
 # ---------- 시트 연결 ----------
 
 with st.expander("① 처음이라면 — 구글시트 연결 방법", expanded=False):
@@ -140,18 +247,21 @@ if not st.session_state.get("ws_ok"):
 
 # ---------- CSV 가져오기 ----------
 
-SCHEMA_COLS = ["date", "time", "ticker", "side", "price", "shares"]
+SCHEMA_COLS = ["date", "time", "ticker", "side", "price", "shares", "currency"]
 TEMPLATE_CSV = (
-    "date,time,ticker,side,price,shares\n"
-    "2026-06-01,09:00,,DEPOSIT,1000000,\n"
-    "2026-06-01,09:30,AAPL,BUY,150,10\n"
-    "2026-06-02,14:00,AAPL,SELL,160,4\n"
+    "date,time,ticker,side,price,shares,currency\n"
+    "2026-06-01,09:00,,DEPOSIT,1000,,USD\n"
+    "2026-06-01,09:30,AAPL,BUY,150,10,USD\n"
+    "2026-06-02,14:00,AAPL,SELL,160,4,USD\n"
+    "2026-06-03,09:05,,DEPOSIT,1000000,,KRW\n"
+    "2026-06-03,09:30,005930.KS,BUY,70000,10,KRW\n"
 )
 
 with st.expander("📥 CSV로 한 번에 가져오기 (선택)", expanded=False):
     st.caption(
-        "아래 양식 CSV를 받아 채운 뒤 업로드하세요. 컬럼: date,time,ticker,side,price,shares. "
-        "입금·출금은 ticker 비우고 side=DEPOSIT/WITHDRAW, price=금액."
+        "아래 양식 CSV를 받아 채운 뒤 업로드하세요. 컬럼: date,time,ticker,side,price,shares,currency. "
+        "입금·출금은 ticker 비우고 side=DEPOSIT/WITHDRAW, price=금액, currency=USD/KRW. "
+        "국내 주식은 005930.KS(코스피)/.KQ(코스닥) 코드."
     )
     st.download_button("양식 CSV 받기", TEMPLATE_CSV, file_name="trades_template.csv", mime="text/csv")
     up = st.file_uploader("CSV 업로드", type=["csv"], key="csv_up")
@@ -177,22 +287,26 @@ with st.expander("📥 CSV로 한 번에 가져오기 (선택)", expanded=False)
 st.subheader("거래 입력")
 st.caption(
     "매매(BUY/SELL)는 티커·가격·수량을. **입금·출금(DEPOSIT/WITHDRAW)은 티커 비우고 '가격/금액'에 금액만.** "
-    "같은 날 단타는 시각(HH:MM)으로 순서가 정해집니다. 다 고친 뒤 **저장**을 누르세요."
+    "**통화**: 입금·출금은 직접 고르고, 매매는 티커로 자동(.KS/.KQ면 원화). "
+    "**국내 주식은 005930.KS(코스피)/.KQ(코스닥) 코드.** 같은 날 단타는 시각으로 순서. 다 고친 뒤 **저장**."
 )
 
 loaded = st.session_state.get("loaded_df")
 if loaded is None or loaded.empty:
     today = date.today()
     loaded = pd.DataFrame([
-        {"date": str(today), "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 1000000.0, "shares": None},
-        {"date": str(today), "time": "09:30", "ticker": "AAPL", "side": "BUY", "price": 150.0, "shares": 10.0},
+        {"date": str(today), "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 1000.0, "shares": None, "currency": "USD"},
+        {"date": str(today), "time": "09:30", "ticker": "AAPL", "side": "BUY", "price": 150.0, "shares": 10.0, "currency": "USD"},
     ])
 
 # 시트·CSV의 문자열을 에디터 컬럼 타입에 맞게 정리
 edit_df = loaded.copy()
-for c in ("ticker", "side", "time"):
+if "currency" not in edit_df.columns:
+    edit_df["currency"] = "USD"
+for c in ("ticker", "side", "time", "currency"):
     if c in edit_df.columns:
         edit_df[c] = edit_df[c].astype(str).replace({"nan": "", "None": ""})
+edit_df["currency"] = edit_df["currency"].replace({"": "USD"}).str.upper()
 edit_df["date"] = pd.to_datetime(edit_df["date"], errors="coerce")
 edit_df["price"] = pd.to_numeric(edit_df["price"], errors="coerce")
 edit_df["shares"] = pd.to_numeric(edit_df["shares"], errors="coerce")
@@ -202,12 +316,14 @@ edited = st.data_editor(
     column_config={
         "date": st.column_config.DateColumn("날짜", format="YYYY-MM-DD", required=True),
         "time": st.column_config.TextColumn("시각", help="HH:MM (24시간)", default="09:30"),
-        "ticker": st.column_config.TextColumn("티커", help="입금·출금은 비워두세요"),
+        "ticker": st.column_config.TextColumn("티커", help="입금·출금은 비워두세요. 국내는 005930.KS"),
         "side": st.column_config.SelectboxColumn(
             "구분", options=["BUY", "SELL", "DEPOSIT", "WITHDRAW"], required=True, default="BUY"),
         "price": st.column_config.NumberColumn(
-            "가격/금액", help="매매는 체결가, 입금·출금은 금액", min_value=0.0, format="%.4f", required=True),
+            "가격/금액", help="매매는 체결가, 입금·출금은 금액", min_value=0.0, format="%.2f", required=True),
         "shares": st.column_config.NumberColumn("수량(주)", help="입금·출금은 비워두세요", min_value=0.0, format="%g"),
+        "currency": st.column_config.SelectboxColumn(
+            "통화", options=["USD", "KRW"], help="입금·출금 통화(매매는 티커로 자동)", default="USD"),
     },
 )
 
@@ -234,130 +350,31 @@ for _, row in edited.iterrows():
         continue
     side = str(row.get("side") or "BUY").upper()
     tk = str(row.get("ticker") or "").strip().upper()
+    ccy = str(row.get("currency") or "USD").strip().upper() or "USD"
+    base = {
+        "date": pd.Timestamp(d).strftime("%Y-%m-%d"),
+        "time": str(row.get("time") or "09:30"),
+    }
     if side in CASH_SIDES:
-        txns.append({
-            "date": pd.Timestamp(d).strftime("%Y-%m-%d"),
-            "time": str(row.get("time") or "09:30"),
-            "ticker": "", "side": side, "price": float(price), "shares": 0.0,
-        })
-    else:  # BUY / SELL — 티커·수량 필요
+        txns.append({**base, "ticker": "", "side": side,
+                     "price": float(price), "shares": 0.0, "currency": ccy})
+    else:  # BUY / SELL — 티커·수량 필요 (통화는 티커로 자동 판정)
         if not tk or pd.isna(row.get("shares")):
             continue
-        txns.append({
-            "date": pd.Timestamp(d).strftime("%Y-%m-%d"),
-            "time": str(row.get("time") or "09:30"),
-            "ticker": tk, "side": side,
-            "price": float(price), "shares": float(row["shares"]),
-        })
+        txns.append({**base, "ticker": tk, "side": side,
+                     "price": float(price), "shares": float(row["shares"]), "currency": ccy})
 
 if not txns:
     st.info("거래를 한 건 이상 입력하세요.")
     st.stop()
 
 
-# ---------- 계산 ----------
+# ---------- 통화별 섹션 ----------
 
-results = jc.process_portfolio(txns)               # 매매 종목별 손익(현금행은 자동 제외)
-price_frames = {tk: prices.get_prices(tk) for tk in results}
-last_closes = {tk: prices.latest_close(price_frames[tk]) for tk in results}
-account = jc.current_account(txns, last_closes)
-
-missing = [tk for tk in results if last_closes[tk] is None]
-if missing:
-    st.warning(f"시세를 못 받은 종목(평가 0 처리): {', '.join(missing)}")
-
-
-# ---------- 계좌 요약 ----------
-
-st.subheader("계좌 요약")
-a = st.columns(3)
-a[0].metric("계좌가치", f"{account['account_value']:,.0f}", help="현금 + 보유 시가평가")
-a[1].metric("현금잔고", f"{account['cash']:,.0f}", help="입금·매도 − 출금·매수")
-a[2].metric("보유 시가", f"{account['holdings_value']:,.0f}")
-
-col_pie, col_curve = st.columns([1, 2])
-
-with col_pie:
-    st.caption("자산배분")
-    if account["allocation"]:
-        st.altair_chart(_pie_chart(account["allocation"]), width="stretch")
-    else:
-        st.info("보유 종목·현금이 없습니다.")
-
-# 계좌가치 곡선 (+ 기간 필터)
-acct_curve = jc.account_value_curve(txns, price_frames)
-with col_curve:
-    st.caption("계좌가치 추이")
-    if acct_curve.empty:
-        st.info("표시할 계좌가치 데이터가 없습니다.")
-    else:
-        dmin = acct_curve.index.min().date()
-        dmax = acct_curve.index.max().date()
-        c1, c2 = st.columns(2)
-        start = c1.date_input("시작", value=dmin, min_value=dmin, max_value=dmax, key="av_start")
-        end = c2.date_input("끝", value=dmax, min_value=dmin, max_value=dmax, key="av_end")
-        win = acct_curve.loc[str(start):str(end)]
-        if win.empty:
-            win = acct_curve
-        st.altair_chart(_line_chart(win, "계좌가치"), width="stretch")
-        change = float(win["계좌가치"].iloc[-1] - win["계좌가치"].iloc[0])
-        st.metric("선택 기간 계좌가치 변화", f"{change:+,.0f}")
-
-
-# ---------- 매매 손익 (종목별) ----------
-
-if not results:
-    st.info("매매 기록이 없습니다(현금 거래만). 종목 매매를 입력하면 손익이 표시됩니다.")
-    st.stop()
-
-st.subheader("매매 손익 — 종목별")
-summary = jc.portfolio_summary(results, last_closes)
-tot_realized = summary["실현손익"].sum()
-tot_unreal = summary["미실현손익"].sum()
-tot_total = summary["총손익"].sum()
-tot_cost = summary["매수금액"].sum()
-tot_ret = (tot_total / tot_cost * 100.0) if tot_cost > 0 else 0.0
-
-m = st.columns(4)
-m[0].metric("실현손익 합계", f"{tot_realized:+,.2f}")
-m[1].metric("미실현손익 합계", f"{tot_unreal:+,.2f}")
-m[2].metric("총손익 합계", f"{tot_total:+,.2f}")
-m[3].metric("수익률", f"{tot_ret:+.2f}%", help="총손익 합계 / 누적 매수금액")
-
-st.dataframe(
-    summary.style.format({
-        "보유수량": "{:g}", "평균단가": "{:,.4f}", "실현손익": "{:+,.2f}",
-        "미실현손익": "{:+,.2f}", "총손익": "{:+,.2f}", "매수금액": "{:,.2f}",
-        "수익률%": "{:+.2f}",
-    }),
-    width="stretch",
-)
-
-# 전체 누적손익 곡선
-st.subheader("전체 누적손익 곡선")
-curve = jc.portfolio_pnl_curve(results, price_frames)
-if not curve.empty:
-    st.altair_chart(_line_with_zero(curve, "누적손익 (가격단위)"), width="stretch")
-
-# 종목별 상세
-st.subheader("종목별 상세")
-pick = st.selectbox("종목 선택", options=list(results))
-res = results[pick]
-detail = jc.build_pnl_curve(res.rows, price_frames.get(pick))
-if not detail.empty:
-    st.altair_chart(
-        _line_with_zero(detail.rename(columns={"누적손익": pick}), "누적손익 (가격단위)"),
-        width="stretch",
-    )
-for w in res.warnings:
-    st.warning(w)
-with st.expander("거래 처리 내역 (평단·실현손익 추적)"):
-    audit = pd.DataFrame([
-        {
-            "시각": r.ts, "구분": r.side, "가격": r.price, "체결수량": r.shares,
-            "보유수량": r.position_shares, "평균단가": r.avg_cost,
-            "누적실현손익": r.realized_pnl, "비고": r.note,
-        }
-        for r in res.rows
-    ])
-    st.dataframe(audit, width="stretch")
+by_ccy = jc.split_by_currency(txns)
+# USD 먼저, 그다음 KRW, 나머지는 알파벳 순
+order = [c for c in ("USD", "KRW") if c in by_ccy] + sorted(c for c in by_ccy if c not in ("USD", "KRW"))
+for i, ccy in enumerate(order):
+    if i > 0:
+        st.divider()
+    render_currency_section(ccy, by_ccy[ccy])

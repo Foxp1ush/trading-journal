@@ -90,6 +90,24 @@ avc = jc.account_value_curve(cash_txns, {"AAPL": _aapl})
 check("계좌가치 곡선 생성", not avc.empty and "계좌가치" in avc.columns,
       f"empty={avc.empty}")
 
+# 다중통화 — USD/KRW 분리, 통화별 독립 계좌
+check("통화 판정 .KS→KRW, 일반→USD",
+      jc.currency_of_ticker("005930.KS") == "KRW" and jc.currency_of_ticker("AAPL") == "USD")
+multi = [
+    {"date": "2026-06-01", "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 2000, "shares": 0, "currency": "USD"},
+    {"date": "2026-06-01", "time": "09:30", "ticker": "AAPL", "side": "BUY", "price": 150, "shares": 10, "currency": "USD"},
+    {"date": "2026-06-02", "time": "09:00", "ticker": "", "side": "DEPOSIT", "price": 1000000, "shares": 0, "currency": "KRW"},
+    {"date": "2026-06-02", "time": "09:30", "ticker": "005930.KS", "side": "BUY", "price": 70000, "shares": 10, "currency": "KRW"},
+]
+buckets = jc.split_by_currency(multi)
+check("통화 2버킷(USD/KRW)", set(buckets) == {"USD", "KRW"}, f"{set(buckets)}")
+usd_acc = jc.current_account(buckets["USD"], {"AAPL": 160.0})
+krw_acc = jc.current_account(buckets["KRW"], {"005930.KS": 72000.0})
+check("USD 현금 =500 (2000−1500)", abs(usd_acc["cash"] - 500) < 1e-6, f"{usd_acc['cash']}")
+check("USD 계좌가치 =2100 (500+10×160)", abs(usd_acc["account_value"] - 2100) < 1e-6, f"{usd_acc['account_value']}")
+check("KRW 현금 =300000 (100만−70만)", abs(krw_acc["cash"] - 300000) < 1e-6, f"{krw_acc['cash']}")
+check("KRW 계좌가치 =1,020,000 (30만+10×72000)", abs(krw_acc["account_value"] - 1020000) < 1e-6, f"{krw_acc['account_value']}")
+
 # 3) 앱 부팅 (AppTest) — exception 0
 try:
     from streamlit.testing.v1 import AppTest

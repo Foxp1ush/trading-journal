@@ -17,7 +17,7 @@ import streamlit as st
 from google.oauth2.service_account import Credentials
 
 WORKSHEET = "trades"
-HEADER = ["date", "time", "ticker", "side", "price", "shares"]
+HEADER = ["date", "time", "ticker", "side", "price", "shares", "currency"]
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
@@ -74,15 +74,31 @@ def connect(sheet_url: str) -> gspread.Worksheet:
 
 
 def load_trades(ws: gspread.Worksheet) -> pd.DataFrame:
-    """워크시트를 DataFrame으로(컬럼 = HEADER). 숫자 컬럼은 형변환."""
-    records = ws.get_all_records(expected_headers=HEADER)
-    df = pd.DataFrame(records, columns=HEADER) if records else pd.DataFrame(columns=HEADER)
+    """워크시트를 DataFrame으로(컬럼 = HEADER). 숫자 형변환 + 하위호환 백필.
+
+    기존 6열 시트(currency 없음)도 읽히도록 실제 헤더 기준으로 읽고 HEADER로 reindex,
+    누락된 currency는 USD로 채운다.
+    """
+    values = ws.get_all_values()
+    if not values:
+        return pd.DataFrame(columns=HEADER)
+    header = [h.strip() for h in values[0]]
+    body = values[1:]
+    df = pd.DataFrame(body, columns=header) if body else pd.DataFrame(columns=header)
+
+    for col in HEADER:               # 누락 컬럼 보정(특히 currency)
+        if col not in df.columns:
+            df[col] = ""
+    df = df[HEADER]
+
+    df["currency"] = (
+        df["currency"].astype(str).str.strip()
+        .replace({"": "USD", "nan": "USD", "None": "USD"}).str.upper()
+    )
     for col in ("price", "shares"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     for col in ("date", "time", "ticker", "side"):
-        if col in df.columns:
-            df[col] = df[col].astype(str).replace("nan", "")
+        df[col] = df[col].astype(str).replace({"nan": "", "None": ""})
     return df
 
 

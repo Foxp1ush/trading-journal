@@ -11,8 +11,8 @@
 - **입금·출금(DEPOSIT/WITHDRAW)** 기록 → 현금잔고 + 보유 시가 = **실제 계좌가치 곡선**과 **자산배분**.
 - **다중통화(USD·KRW)**: 달러 계좌와 원화 계좌를 **분리**해 각각 계좌가치·손익·자산배분 표시
   (통화를 섞어 더하지 않음).
-- **국내 종목 검색**: `.KS`/`.KQ`를 몰라도 **종목명(삼성전자)·6자리 코드(005930)로 검색→추가**
-  (FinanceDataReader의 KRX 목록 → 야후 티커 자동 변환, 시세는 yfinance). 미국 주식은 티커(AAPL) 직접 입력.
+- **종목 검색(국내·미국)**: 티커를 몰라도 **종목명(삼성전자·apple)·코드(005930)·심볼(AAPL)로 검색→추가**
+  (FinanceDataReader 목록 → 야후 티커 자동 변환·통화 자동, 시세는 yfinance).
 - **CSV 가져오기**: 양식 CSV를 받아 채운 뒤 업로드하면 한 번에 입력(어느 증권사든 그 양식으로 옮기면 됨).
 
 ---
@@ -118,7 +118,7 @@ git push
 | `journal_app.py` | Streamlit UI (시트 연결 · 입력표 · 저장 · 요약 · 곡선) |
 | `journal_core.py` | 평균단가 엔진 + 여러 종목 집계 + 누적손익 곡선 (순수 로직) |
 | `prices.py` | yfinance 시세 + 세션 캐시 |
-| `krx.py` | 국내 종목명/코드 → 야후 티커 변환 (FinanceDataReader KRX 목록) |
+| `krx.py` | 종목 검색(국내·미국) → 야후 티커 변환 (FinanceDataReader 목록) |
 | `sheets.py` | gspread 서비스 계정으로 사용자 시트 read/write |
 | `smoke_test.py` | push 전 자동 점검(import·평단 검산·앱 부팅) |
 | `run_local.ps1` / `check.ps1` | 로컬 실행 / 점검 편의 스크립트 |
